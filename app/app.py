@@ -189,17 +189,18 @@ p, span, div, label, li {{
     color: {INK};
 }}
 
-div[data-baseweb="tab-list"] {{
-    display: flex;
-    width: 100%;
-    gap: 0;
+div[data-baseweb="tab-list"], .stTabs [data-baseweb="tab-list"] {{
+    display: flex !important;
+    width: 100% !important;
+    gap: 0 !important;
     border-bottom: 1px solid {LINE};
 }}
 
-button[data-baseweb="tab"] {{
-    flex: 1 1 0;
-    display: flex;
-    justify-content: center;
+button[data-baseweb="tab"], .stTabs button[data-baseweb="tab"] {{
+    flex: 1 1 0 !important;
+    max-width: none !important;
+    display: flex !important;
+    justify-content: center !important;
     font-family: 'IBM Plex Sans', sans-serif;
     font-size: 1.02rem;
     font-weight: 500;
@@ -664,31 +665,31 @@ with tab3:
 
     with info_col2:
         st.markdown('<div class="section-label">Architecture</div>', unsafe_allow_html=True)
-        st.markdown(
-            """
-            <div class="ledger-panel" style="font-size:0.92rem; line-height:1.7;">
-            Model: XGBoost, natural class imbalance<br>
-            Split: customer-grouped, no window leakage<br>
-            Calibration: isotonic regression<br>
-            Features: 12 RFM-based<br>
-            Window: 12-month observation, 90-day prediction<br>
-            Tuning: 50 Optuna trials on PR-AUC
-            </div>
-            """,
-            unsafe_allow_html=True
+        architecture_rows = {
+            "Model": "XGBoost, natural class imbalance",
+            "Split": "customer-grouped, no window leakage",
+            "Calibration": "isotonic regression",
+            "Features": "12 RFM-based",
+            "Window": "12-month observation, 90-day prediction",
+            "Tuning": "50 Optuna trials on PR-AUC",
+        }
+        rows_html = "".join(
+            f'<div class="breakdown-row"><span>{label}</span><span style="color:{INK_SOFT};">{value}</span></div>'
+            for label, value in architecture_rows.items()
         )
+        st.markdown(f'<div class="ledger-panel">{rows_html}</div>', unsafe_allow_html=True)
 
         st.markdown('<div class="section-label">Configurable parameters</div>', unsafe_allow_html=True)
-        st.markdown(
-            f"""
-            <div class="ledger-panel" style="font-size:0.92rem; line-height:1.7;">
-            Intervention cost: £{COST_OF_OFFER}<br>
-            Success rate: {INTERVENTION_SUCCESS_RATE:.0%}<br>
-            Revenue horizon: {MONTHS_REVENUE_SAVED} months
-            </div>
-            """,
-            unsafe_allow_html=True
+        config_rows = {
+            "Intervention cost": f"£{COST_OF_OFFER}",
+            "Success rate": f"{INTERVENTION_SUCCESS_RATE:.0%}",
+            "Revenue horizon": f"{MONTHS_REVENUE_SAVED} months",
+        }
+        rows_html = "".join(
+            f'<div class="breakdown-row"><span>{label}</span><span style="color:{INK_SOFT};">{value}</span></div>'
+            for label, value in config_rows.items()
         )
+        st.markdown(f'<div class="ledger-panel">{rows_html}</div>', unsafe_allow_html=True)
         st.markdown('<div class="section-label" style="margin-top:0.6rem;">Profit formula</div>', unsafe_allow_html=True)
         st.markdown(
             f'''
