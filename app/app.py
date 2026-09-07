@@ -16,16 +16,16 @@ from src.evaluation.profit_optimizer import compute_expected_profit, compute_avg
 
 st.set_page_config(page_title="Churn Ledger", layout="wide", initial_sidebar_state="expanded")
 
-BG = "#142822"
-PANEL = "#1B342C"
-PANEL_RAISED = "#20241C"
-INK = "#F1E9D8"
-INK_SOFT = "#B9C4B7"
-LINE = "#3A5449"
-GOLD = "#D3A94B"
-GOLD_SOFT = "#2E2A18"
-LOSS = "#E07A5F"
-LOSS_SOFT = "#3A211B"
+BG = "#FBF7EE"
+PANEL = "#FFFDF8"
+PANEL_RAISED = "#F3ECDC"
+INK = "#26241D"
+INK_SOFT = "#75705F"
+LINE = "#E2D9C3"
+PROFIT = "#1B7A4D"
+PROFIT_SOFT = "#E3F0E7"
+LOSS = "#A8432C"
+LOSS_SOFT = "#F9E9E1"
 
 THEME_CSS = f"""
 <style>
@@ -58,20 +58,25 @@ p, span, div, label, li {{
     color: {INK};
 }}
 
+.header-block {{
+    text-align: center;
+    max-width: 720px;
+    margin: 0 auto 1rem auto;
+}}
+
 .ledger-title {{
     font-family: 'Source Serif 4', serif;
     font-weight: 600;
-    font-size: 2.1rem;
-    margin-bottom: 0.1rem;
+    font-size: 2.6rem;
+    margin-bottom: 0.3rem;
     letter-spacing: -0.01em;
     color: {INK};
 }}
 
 .ledger-subtitle {{
     color: {INK_SOFT};
-    font-size: 0.98rem;
-    max-width: 640px;
-    line-height: 1.5;
+    font-size: 1.02rem;
+    line-height: 1.55;
     margin-bottom: 0.4rem;
 }}
 
@@ -116,7 +121,7 @@ p, span, div, label, li {{
     color: {INK};
 }}
 
-.stat-card.profit .value {{ color: {GOLD} !important; }}
+.stat-card.profit .value {{ color: {PROFIT} !important; }}
 .stat-card.loss .value {{ color: {LOSS} !important; }}
 
 .decision-badge {{
@@ -128,9 +133,9 @@ p, span, div, label, li {{
 }}
 
 .decision-badge.intervene {{
-    color: {GOLD} !important;
-    background-color: {GOLD_SOFT};
-    border-color: {GOLD};
+    color: {PROFIT} !important;
+    background-color: {PROFIT_SOFT};
+    border-color: {PROFIT};
 }}
 
 .decision-badge.hold {{
@@ -169,15 +174,15 @@ p, span, div, label, li {{
 .formula-panel {{
     background-color: {PANEL};
     border: 1px solid {LINE};
-    border-left: 3px solid {GOLD};
+    border-left: 3px solid {PROFIT};
     padding: 1rem 1.2rem;
     margin: 0.8rem 0;
     color: {INK};
 }}
 
 .insight-line {{
-    border-left: 3px solid {GOLD};
-    background-color: {GOLD_SOFT};
+    border-left: 3px solid {PROFIT};
+    background-color: {PROFIT_SOFT};
     padding: 0.7rem 1rem;
     font-size: 0.95rem;
     margin: 0.6rem 0 1.2rem 0;
@@ -185,40 +190,49 @@ p, span, div, label, li {{
 }}
 
 div[data-baseweb="tab-list"] {{
-    gap: 1.8rem;
+    display: flex;
+    width: 100%;
+    gap: 0;
     border-bottom: 1px solid {LINE};
 }}
 
 button[data-baseweb="tab"] {{
+    flex: 1 1 0;
+    display: flex;
+    justify-content: center;
     font-family: 'IBM Plex Sans', sans-serif;
-    font-size: 0.95rem;
+    font-size: 1.02rem;
+    font-weight: 500;
+    letter-spacing: 0.01em;
     color: {INK_SOFT} !important;
-    padding-bottom: 0.6rem;
+    padding: 0.5rem 0 0.8rem 0;
     background-color: transparent;
 }}
 
 button[data-baseweb="tab"] p {{
     color: {INK_SOFT} !important;
+    font-size: 1.02rem;
+    font-weight: 500;
 }}
 
 button[data-baseweb="tab"][aria-selected="true"] {{
-    color: {GOLD} !important;
+    color: {PROFIT} !important;
     font-weight: 600;
 }}
 
 button[data-baseweb="tab"][aria-selected="true"] p {{
-    color: {GOLD} !important;
+    color: {PROFIT} !important;
     font-weight: 600;
 }}
 
 div[data-baseweb="tab-highlight"] {{
-    background-color: {GOLD} !important;
+    background-color: {PROFIT} !important;
     height: 2px !important;
 }}
 
 .stButton>button, .stDownloadButton>button {{
-    background-color: {GOLD};
-    color: {BG} !important;
+    background-color: {PROFIT};
+    color: #FFFFFF !important;
     border-radius: 0;
     border: none;
     font-family: 'IBM Plex Sans', sans-serif;
@@ -226,11 +240,11 @@ div[data-baseweb="tab-highlight"] {{
     padding: 0.5rem 1.2rem;
 }}
 
-.stButton>button *, .stDownloadButton>button * {{ color: {BG} !important; }}
+.stButton>button *, .stDownloadButton>button * {{ color: #FFFFFF !important; }}
 
 .stButton>button:hover, .stDownloadButton>button:hover {{
     background-color: {INK};
-    color: {BG} !important;
+    color: #FFFFFF !important;
 }}
 
 section[data-testid="stSidebar"] {{
@@ -248,7 +262,7 @@ section[data-testid="stSidebar"] .block-container {{
     font-size: 1.15rem;
     font-weight: 600;
     margin-bottom: 0.9rem;
-    color: {GOLD} !important;
+    color: {PROFIT} !important;
 }}
 
 .sidebar-row {{
@@ -274,8 +288,8 @@ section[data-testid="stSidebar"] .block-container {{
 }}
 
 code {{
-    background-color: {GOLD_SOFT} !important;
-    color: {GOLD} !important;
+    background-color: {PROFIT_SOFT} !important;
+    color: {PROFIT} !important;
 }}
 
 [data-testid="stDataFrame"] {{
@@ -355,7 +369,7 @@ def render_threshold_chart(threshold_df, optimal_threshold):
         x=threshold_df["threshold"],
         y=threshold_df["net_profit"],
         mode="lines",
-        line=dict(color=GOLD, width=2),
+        line=dict(color=PROFIT, width=2),
         fill="tozeroy",
         fillcolor="rgba(211,169,75,0.15)",
         name="Net profit"
@@ -366,7 +380,7 @@ def render_threshold_chart(threshold_df, optimal_threshold):
             x=optimal_row["threshold"],
             y=optimal_row["net_profit"],
             mode="markers",
-            marker=dict(color=GOLD, size=10, line=dict(color=INK, width=1)),
+            marker=dict(color=PROFIT, size=10, line=dict(color=INK, width=1)),
             name="Optimal threshold"
         ))
     fig.update_layout(
@@ -396,10 +410,12 @@ def style_shap_figure(fig):
     return fig
 
 
-st.markdown('<div class="ledger-title">Customer Churn, Profit Ledger</div>', unsafe_allow_html=True)
 st.markdown(
+    '<div class="header-block">'
+    '<div class="ledger-title">Customer Churn, Profit Ledger</div>'
     '<div class="ledger-subtitle">Calibrated churn probabilities, priced against intervention cost and '
-    'retention value, to decide who is worth a retention offer and who is not.</div>',
+    'retention value, to decide who is worth a retention offer and who is not.</div>'
+    '</div>',
     unsafe_allow_html=True
 )
 st.markdown('<hr class="ledger-rule">', unsafe_allow_html=True)
@@ -418,7 +434,7 @@ with st.sidebar:
     st.markdown(
         f"""
         <div style="font-size:0.85rem; line-height:1.6; color:{INK_SOFT};">
-        <span class="legend-swatch" style="background-color:{GOLD};"></span>Intervene — expected profit is positive.<br>
+        <span class="legend-swatch" style="background-color:{PROFIT};"></span>Intervene — expected profit is positive.<br>
         <span class="legend-swatch" style="background-color:{LOSS};"></span>Do not intervene — expected profit is negative.
         </div>
         """,
@@ -622,25 +638,9 @@ with tab2:
         st.info("Profit comparison data not found. Run 'python scripts/run_pipeline.py' first.")
 
 with tab3:
-    info_col1, info_col2, info_col3 = st.columns(3)
+    info_col1, info_col2 = st.columns(2)
 
     with info_col1:
-        st.markdown('<div class="section-label">Architecture</div>', unsafe_allow_html=True)
-        st.markdown(
-            """
-            <div class="ledger-panel" style="font-size:0.92rem; line-height:1.7;">
-            Model: XGBoost, natural class imbalance<br>
-            Split: customer-grouped, no window leakage<br>
-            Calibration: isotonic regression<br>
-            Features: 12 RFM-based<br>
-            Window: 12-month observation, 90-day prediction<br>
-            Tuning: 50 Optuna trials on PR-AUC
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-    with info_col2:
         st.markdown('<div class="section-label">Feature descriptions</div>', unsafe_allow_html=True)
         feature_descriptions = {
             "recency": "Days since last purchase",
@@ -662,7 +662,22 @@ with tab3:
         )
         st.markdown(f'<div class="ledger-panel">{rows_html}</div>', unsafe_allow_html=True)
 
-    with info_col3:
+    with info_col2:
+        st.markdown('<div class="section-label">Architecture</div>', unsafe_allow_html=True)
+        st.markdown(
+            """
+            <div class="ledger-panel" style="font-size:0.92rem; line-height:1.7;">
+            Model: XGBoost, natural class imbalance<br>
+            Split: customer-grouped, no window leakage<br>
+            Calibration: isotonic regression<br>
+            Features: 12 RFM-based<br>
+            Window: 12-month observation, 90-day prediction<br>
+            Tuning: 50 Optuna trials on PR-AUC
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
         st.markdown('<div class="section-label">Configurable parameters</div>', unsafe_allow_html=True)
         st.markdown(
             f"""
