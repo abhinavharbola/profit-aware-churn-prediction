@@ -189,14 +189,14 @@ p, span, div, label, li {{
     color: {INK};
 }}
 
-div[data-baseweb="tab-list"], .stTabs [data-baseweb="tab-list"] {{
+[data-testid="stTabs"] [role="tablist"] {{
     display: flex !important;
     width: 100% !important;
     gap: 0 !important;
     border-bottom: 1px solid {LINE};
 }}
 
-button[data-baseweb="tab"], .stTabs button[data-baseweb="tab"] {{
+[data-testid="stTabs"] [data-testid="stTab"] {{
     flex: 1 1 0 !important;
     max-width: none !important;
     display: flex !important;
@@ -208,27 +208,24 @@ button[data-baseweb="tab"], .stTabs button[data-baseweb="tab"] {{
     color: {INK_SOFT} !important;
     padding: 0.5rem 0 0.8rem 0;
     background-color: transparent;
+    border-bottom: 2px solid transparent;
 }}
 
-button[data-baseweb="tab"] p {{
+[data-testid="stTabs"] [data-testid="stTab"] p {{
     color: {INK_SOFT} !important;
     font-size: 1.02rem;
     font-weight: 500;
 }}
 
-button[data-baseweb="tab"][aria-selected="true"] {{
+[data-testid="stTabs"] [data-testid="stTab"][aria-selected="true"] {{
     color: {PROFIT} !important;
     font-weight: 600;
+    border-bottom: 2px solid {PROFIT};
 }}
 
-button[data-baseweb="tab"][aria-selected="true"] p {{
+[data-testid="stTabs"] [data-testid="stTab"][aria-selected="true"] p {{
     color: {PROFIT} !important;
     font-weight: 600;
-}}
-
-div[data-baseweb="tab-highlight"] {{
-    background-color: {PROFIT} !important;
-    height: 2px !important;
 }}
 
 .stButton>button, .stDownloadButton>button {{
@@ -295,6 +292,10 @@ code {{
 
 [data-testid="stDataFrame"] {{
     border: 1px solid {LINE};
+}}
+
+[data-testid="stIconMaterial"] {{
+    font-family: 'Material Symbols Rounded' !important;
 }}
 </style>
 """
@@ -435,8 +436,8 @@ with st.sidebar:
     st.markdown(
         f"""
         <div style="font-size:0.85rem; line-height:1.6; color:{INK_SOFT};">
-        <span class="legend-swatch" style="background-color:{PROFIT};"></span>Intervene — expected profit is positive.<br>
-        <span class="legend-swatch" style="background-color:{LOSS};"></span>Do not intervene — expected profit is negative.
+        <span class="legend-swatch" style="background-color:{PROFIT};"></span>Intervene: expected profit is positive.<br>
+        <span class="legend-swatch" style="background-color:{LOSS};"></span>Do not intervene: expected profit is negative.
         </div>
         """,
         unsafe_allow_html=True
