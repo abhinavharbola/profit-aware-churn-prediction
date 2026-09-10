@@ -14,7 +14,8 @@ from config import COST_OF_OFFER, INTERVENTION_SUCCESS_RATE, MONTHS_REVENUE_SAVE
 from src.evaluation.explainability import get_tree_explainer, compute_shap_explanation
 from src.evaluation.profit_optimizer import compute_expected_profit, compute_avg_monthly_spend
 
-st.set_page_config(page_title="Churn Ledger", layout="wide", initial_sidebar_state="expanded")
+ICON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "churn_ledger_icon.png"))
+st.set_page_config(page_title="Churn Ledger", page_icon=ICON_PATH, layout="wide", initial_sidebar_state="expanded")
 
 BG = "#FBF7EE"
 PANEL = "#FFFDF8"
@@ -204,6 +205,28 @@ p, span, div, label, li {{
     margin: 0.45rem 0 0.7rem 0;
 }}
 
+.feature-columns {{
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 1.1rem;
+}}
+
+.feature-card .breakdown-row {{
+    font-size: 0.84rem;
+    padding: 0.42rem 0;
+    gap: 0.6rem;
+}}
+
+.feature-card .breakdown-row span:last-child {{
+    text-align: right;
+}}
+
+@media (max-width: 900px) {{
+    .feature-columns {{
+        grid-template-columns: 1fr;
+    }}
+}}
+
 .info-card .breakdown-row {{
     padding: 0.48rem 0;
 }}
@@ -225,7 +248,7 @@ p, span, div, label, li {{
     display: flex !important;
     width: 100% !important;
     gap: 0 !important;
-    border-bottom: 1px solid {LINE};
+    border-bottom: none !important;
 }}
 
 [data-testid="stTabs"] [data-testid="stTab"] {{
@@ -240,7 +263,7 @@ p, span, div, label, li {{
     color: {INK} !important;
     padding: 0.5rem 0 0.8rem 0;
     background-color: transparent;
-    border-bottom: 2px solid transparent;
+    border-bottom: none !important;
 }}
 
 [data-testid="stTabs"] [data-testid="stTab"] p {{
@@ -252,7 +275,12 @@ p, span, div, label, li {{
 [data-testid="stTabs"] [data-testid="stTab"][aria-selected="true"] {{
     color: {INK} !important;
     font-weight: 600;
-    border-bottom: 2px solid {INK};
+    border-bottom: none !important;
+}}
+
+[data-testid="stTabs"] [data-baseweb="tab-highlight"] {{
+    background-color: {INK} !important;
+    height: 2px !important;
 }}
 
 [data-testid="stTabs"] [data-testid="stTab"][aria-selected="true"] p {{
@@ -313,7 +341,7 @@ section[data-testid="stSidebar"] .block-container {{
     font-size: 1.15rem;
     font-weight: 600;
     margin-bottom: 0.9rem;
-    color: {PROFIT} !important;
+    color: {INK} !important;
 }}
 
 .sidebar-row {{
@@ -700,36 +728,68 @@ with tab2:
         st.info("Profit comparison data not found. Run 'python scripts/run_pipeline.py' first.")
 
 with tab3:
-    info_col1, info_col2 = st.columns(2, gap="medium")
+    feature_descriptions = {
+        "recency": "Days since last purchase",
+        "frequency": "Unique invoices in window",
+        "monetary_total": "Total revenue in window",
+        "monetary_avg": "Avg revenue per line item (not per order)",
+        "unique_products": "Distinct products purchased",
+        "spend_30d": "Spend in last 30 days",
+        "spend_90d": "Spend in last 90 days",
+        "interpurchase_mean": "Avg days between purchases",
+        "interpurchase_std": "Std days between purchases",
+        "spend_trend": "Slope of monthly spend",
+        "product_diversity": "Unique products / total orders",
+        "seasonal_dropoff": "Active 91-180d ago, inactive last 90d",
+    }
 
-    with info_col1:
-        feature_descriptions = {
-            "recency": "Days since last purchase",
-            "frequency": "Unique invoices in window",
-            "monetary_total": "Total revenue in window",
-            "monetary_avg": "Avg revenue per line item (not per order)",
-            "unique_products": "Distinct products purchased",
-            "spend_30d": "Spend in last 30 days",
-            "spend_90d": "Spend in last 90 days",
-            "interpurchase_mean": "Avg days between purchases",
-            "interpurchase_std": "Std days between purchases",
-            "spend_trend": "Slope of monthly spend",
-            "product_diversity": "Unique products / total orders",
-            "seasonal_dropoff": "Active 91-180d ago, inactive last 90d",
-        }
-        rows_html = "".join(
-            f'<div class="breakdown-row"><span>{feat}</span><span style="color:{INK_SOFT};">{desc}</span></div>'
-            for feat, desc in feature_descriptions.items()
+    row1_col1, row1_col2 = st.columns(2, gap="small")
+
+    with row1_col1:
+        feature_items = list(feature_descriptions.items())
+        feature_groups = [feature_items[:6], feature_items[6:]]
+        feature_columns_html = "".join(
+            '<div class="feature-column">'
+            + "".join(
+                f'<div class="breakdown-row"><span>{feat}</span><span style="color:{INK_SOFT};">{desc}</span></div>'
+                for feat, desc in group
+            )
+            + '</div>'
+            for group in feature_groups
         )
         st.markdown(
-            f'<div class="info-card">'
+            f'<div class="info-card feature-card">'
             f'<div class="info-card-title">Feature descriptions</div>'
             f'<div class="info-card-subtitle">The 12 RFM-based inputs used by the model.</div>'
-            f'{rows_html}'
+            f'<div class="feature-columns">{feature_columns_html}</div>'
             f'</div>',
             unsafe_allow_html=True
         )
 
+    with row1_col2:
+        architecture_rows = {
+            "Model": "XGBoost, natural class imbalance",
+            "Split": "chronological train/validation/test periods",
+            "Calibration": "pre-test validation period",
+            "Features": "12 RFM-based",
+            "Window": "12-month observation, 90-day prediction",
+            "Tuning": "50 Optuna trials on earlier validation data",
+        }
+        architecture_html = "".join(
+            f'<div class="breakdown-row"><span>{label}</span><span style="color:{INK_SOFT};">{value}</span></div>'
+            for label, value in architecture_rows.items()
+        )
+        st.markdown(
+            f'<div class="info-card">'
+            f'<div class="info-card-title">Architecture</div>'
+            f'{architecture_html}'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
+    row2_col1, row2_col2 = st.columns(2, gap="small")
+
+    with row2_col1:
         st.markdown(
             f'<div class="info-card">'
             f'<div class="info-card-title">Profit formula</div>'
@@ -745,54 +805,36 @@ with tab3:
             unsafe_allow_html=True
         )
 
-    with info_col2:
-        architecture_rows = {
-            "Model": "XGBoost, natural class imbalance",
-            "Split": "chronological train/validation/test periods",
-            "Calibration": "pre-test validation period",
-            "Features": "12 RFM-based",
-            "Window": "12-month observation, 90-day prediction",
-            "Tuning": "50 Optuna trials on earlier validation data",
-        }
-        rows_html = "".join(
-            f'<div class="breakdown-row"><span>{label}</span><span style="color:{INK_SOFT};">{value}</span></div>'
-            for label, value in architecture_rows.items()
-        )
-        st.markdown(
-            f'<div class="info-card">'
-            f'<div class="info-card-title">Architecture</div>'
-            f'{rows_html}'
-            f'</div>',
-            unsafe_allow_html=True
-        )
-
+    with row2_col2:
         config_rows = {
             "Intervention cost": f"£{COST_OF_OFFER}",
             "Success rate": f"{INTERVENTION_SUCCESS_RATE:.0%}",
             "Revenue horizon": f"{MONTHS_REVENUE_SAVED} months",
         }
-        rows_html = "".join(
+        config_html = "".join(
             f'<div class="breakdown-row"><span>{label}</span><span style="color:{INK_SOFT};">{value}</span></div>'
             for label, value in config_rows.items()
         )
         st.markdown(
             f'<div class="info-card">'
             f'<div class="info-card-title">Configurable parameters</div>'
-            f'{rows_html}'
+            f'{config_html}'
             f'</div>',
             unsafe_allow_html=True
         )
 
-        st.markdown(
-            f'<div class="info-card">'
-            f'<div class="info-card-title">Held-out evaluation</div>'
-            f'<div class="breakdown-row"><span>PR-AUC</span><span class="amount">{metrics["pr_auc"]:.4f}</span></div>'
-            f'<div class="breakdown-row"><span>Brier score</span><span class="amount">{metrics["brier_score"]:.4f}</span></div>'
-            f'<div class="breakdown-row"><span>Locked threshold</span><span class="amount">{optimal_threshold:.2f}</span></div>'
-            f'<div class="breakdown-row"><span>Evaluation split</span><span style="color:{INK_SOFT};">Final chronological test set</span></div>'
-            f'</div>',
-            unsafe_allow_html=True
-        )
+    st.markdown(
+        f'<div class="info-card">'
+        f'<div class="info-card-title">Held-out evaluation</div>'
+        f'<div class="evaluation-grid">'
+        f'<div class="breakdown-row"><span>PR-AUC</span><span class="amount">{metrics["pr_auc"]:.4f}</span></div>'
+        f'<div class="breakdown-row"><span>Brier score</span><span class="amount">{metrics["brier_score"]:.4f}</span></div>'
+        f'<div class="breakdown-row"><span>Locked threshold</span><span class="amount">{optimal_threshold:.2f}</span></div>'
+        f'<div class="breakdown-row"><span>Evaluation split</span><span style="color:{INK_SOFT};">Final chronological test set</span></div>'
+        f'</div>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
 
 
 with tab4:
@@ -886,5 +928,3 @@ with tab4:
                     file_name="all_customers_scored.csv",
                     mime="text/csv"
                 )
-
-
