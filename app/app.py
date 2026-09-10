@@ -205,10 +205,62 @@ p, span, div, label, li {{
     margin: 0.45rem 0 0.7rem 0;
 }}
 
+.info-card-section-title {{
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: {INK_SOFT};
+    margin: 1rem 0 0.15rem 0;
+    padding-bottom: 0.35rem;
+    border-bottom: 1px solid {LINE};
+}}
+
+.architecture-card .breakdown-row {{
+    padding: 0.43rem 0;
+}}
+
+.architecture-card .customer-level-row {{
+    align-items: flex-start;
+}}
+
+.architecture-card .customer-level-row span:first-child {{
+    min-width: 110px;
+}}
+
+.architecture-card .customer-level-row span:last-child {{
+    flex: 1;
+    text-align: right;
+}}
+
+.architecture-note {{
+    margin-top: 0.85rem;
+    padding-top: 0.7rem;
+    border-top: 1px dashed {LINE};
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: {INK_SOFT};
+}}
+
 .feature-columns {{
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0 1.1rem;
+}}
+
+.model-info-grid {{
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+    align-items: stretch;
+    margin-bottom: 1rem;
+}}
+
+.model-info-grid > .info-card {{
+    height: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    margin-bottom: 0;
 }}
 
 .feature-card .breakdown-row {{
@@ -223,6 +275,10 @@ p, span, div, label, li {{
 
 @media (max-width: 900px) {{
     .feature-columns {{
+        grid-template-columns: 1fr;
+    }}
+
+    .model-info-grid {{
         grid-template-columns: 1fr;
     }}
 }}
@@ -740,88 +796,93 @@ with tab3:
         "interpurchase_std": "Std days between purchases",
         "spend_trend": "Slope of monthly spend",
         "product_diversity": "Unique products / total orders",
-        "seasonal_dropoff": "Active 91-180d ago, inactive last 90d",
+        "seasonal_dropoff": "Inactive last 90d",
     }
 
-    row1_col1, row1_col2 = st.columns(2, gap="small")
+    feature_items = list(feature_descriptions.items())
+    feature_groups = [feature_items[:6], feature_items[6:]]
+    feature_columns_html = "".join(
+        '<div class="feature-column">'
+        + "".join(
+            f'<div class="breakdown-row"><span>{feat}</span><span style="color:{INK_SOFT};">{desc}</span></div>'
+            for feat, desc in group
+        )
+        + '</div>'
+        for group in feature_groups
+    )
 
-    with row1_col1:
-        feature_items = list(feature_descriptions.items())
-        feature_groups = [feature_items[:6], feature_items[6:]]
-        feature_columns_html = "".join(
-            '<div class="feature-column">'
-            + "".join(
-                f'<div class="breakdown-row"><span>{feat}</span><span style="color:{INK_SOFT};">{desc}</span></div>'
-                for feat, desc in group
-            )
-            + '</div>'
-            for group in feature_groups
-        )
-        st.markdown(
-            f'<div class="info-card feature-card">'
-            f'<div class="info-card-title">Feature descriptions</div>'
-            f'<div class="info-card-subtitle">The 12 RFM-based inputs used by the model.</div>'
-            f'<div class="feature-columns">{feature_columns_html}</div>'
-            f'</div>',
-            unsafe_allow_html=True
-        )
+    architecture_rows = {
+        "Model": "XGBoost, natural class imbalance",
+        "Split": "chronological train/validation/test periods",
+        "Calibration": "pre-test validation period",
+        "Features": "12 RFM-based",
+        "Window": "12-month observation, 90-day prediction",
+        "Tuning": "50 Optuna trials on earlier validation data",
+    }
+    architecture_html = "".join(
+        f'<div class="breakdown-row"><span>{label}</span><span style="color:{INK_SOFT};">{value}</span></div>'
+        for label, value in architecture_rows.items()
+    )
 
-    with row1_col2:
-        architecture_rows = {
-            "Model": "XGBoost, natural class imbalance",
-            "Split": "chronological train/validation/test periods",
-            "Calibration": "pre-test validation period",
-            "Features": "12 RFM-based",
-            "Window": "12-month observation, 90-day prediction",
-            "Tuning": "50 Optuna trials on earlier validation data",
-        }
-        architecture_html = "".join(
-            f'<div class="breakdown-row"><span>{label}</span><span style="color:{INK_SOFT};">{value}</span></div>'
-            for label, value in architecture_rows.items()
-        )
-        st.markdown(
-            f'<div class="info-card">'
-            f'<div class="info-card-title">Architecture</div>'
-            f'{architecture_html}'
-            f'</div>',
-            unsafe_allow_html=True
-        )
+    decision_rows = {
+        "Decision rule": "INTERVENE when expected profit > £0",
+        "Customer-level": "Profit depends on each one's spend and churn risk",
+        "Revenue": f"Avg monthly spend × {MONTHS_REVENUE_SAVED} months",
+        "Offer economics": f"{INTERVENTION_SUCCESS_RATE:.0%} success rate × revenue at stake − £{COST_OF_OFFER:.0f} cost",
+    }
+    decision_html = "".join(
+    f'<div class="breakdown-row {"customer-level-row" if label == "Customer-level" else ""}"><span>{label}</span><span style="color:{INK_SOFT};">{value}</span></div>'
+    for label, value in decision_rows.items()
+    )
 
-    row2_col1, row2_col2 = st.columns(2, gap="small")
+    st.markdown(
+        f'<div class="model-info-grid">'
+        f'<div class="info-card feature-card">'
+        f'<div class="info-card-title">Feature descriptions</div>'
+        f'<div class="info-card-subtitle">The 12 RFM-based inputs used by the model.</div>'
+        f'<div class="feature-columns">{feature_columns_html}</div>'
+        f'<div class="architecture-note">seasonal_dropoff is a binary recency signal: 1 when a customer was active 91–180 days ago but inactive during the last 90 days.</div>'
+        f'</div>'
+        f'<div class="info-card architecture-card">'
+        f'<div class="info-card-title">Architecture</div>'
+        f'{architecture_html}'
+        f'<div class="info-card-section-title">Decision policy</div>'
+        f'{decision_html}'
+        f'</div>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
 
-    with row2_col1:
-        st.markdown(
-            f'<div class="info-card">'
-            f'<div class="info-card-title">Profit formula</div>'
-            f'<div class="formula-panel">'
-            f'<span style="font-family:IBM Plex Mono, monospace; font-size:1.05rem; color:{INK};">'
-            f'E[&Delta;Profit] = p<sub>i</sub> &middot; (&gamma; &middot; V<sub>i</sub>) &minus; C'
-            f'</span>'
-            f'</div>'
-            f'<div style="font-size:0.78rem; line-height:1.5; color:{INK_SOFT};">'
-            f'p: calibrated churn probability · γ: success rate · V: avg monthly spend × 3 · C: cost'
-            f'</div>'
-            f'</div>',
-            unsafe_allow_html=True
-        )
+    config_rows = {
+        "Intervention cost": f"£{COST_OF_OFFER}",
+        "Success rate": f"{INTERVENTION_SUCCESS_RATE:.0%}",
+        "Revenue horizon": f"{MONTHS_REVENUE_SAVED} months",
+    }
+    config_html = "".join(
+        f'<div class="breakdown-row"><span>{label}</span><span style="color:{INK_SOFT};">{value}</span></div>'
+        for label, value in config_rows.items()
+    )
 
-    with row2_col2:
-        config_rows = {
-            "Intervention cost": f"£{COST_OF_OFFER}",
-            "Success rate": f"{INTERVENTION_SUCCESS_RATE:.0%}",
-            "Revenue horizon": f"{MONTHS_REVENUE_SAVED} months",
-        }
-        config_html = "".join(
-            f'<div class="breakdown-row"><span>{label}</span><span style="color:{INK_SOFT};">{value}</span></div>'
-            for label, value in config_rows.items()
-        )
-        st.markdown(
-            f'<div class="info-card">'
-            f'<div class="info-card-title">Configurable parameters</div>'
-            f'{config_html}'
-            f'</div>',
-            unsafe_allow_html=True
-        )
+    st.markdown(
+        f'<div class="model-info-grid">'
+        f'<div class="info-card">'
+        f'<div class="info-card-title">Profit formula</div>'
+        f'<div class="formula-panel">'
+        f'<span style="font-family:IBM Plex Mono, monospace; font-size:1.05rem; color:{INK};">'
+        f'E[&Delta;Profit] = p<sub>i</sub> &middot; (&gamma; &middot; V<sub>i</sub>) &minus; C'
+        f'</span>'
+        f'</div>'
+        f'<div style="font-size:0.78rem; line-height:1.5; color:{INK_SOFT};">'
+        f'p: calibrated churn probability · γ: success rate · V: avg monthly spend × 3 · C: cost'
+        f'</div>'
+        f'</div>'
+        f'<div class="info-card">'
+        f'<div class="info-card-title">Configurable parameters</div>'
+        f'{config_html}'
+        f'</div>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
 
     st.markdown(
         f'<div class="info-card">'
@@ -835,7 +896,6 @@ with tab3:
         f'</div>',
         unsafe_allow_html=True
     )
-
 
 with tab4:
     feature_df = load_feature_matrix()

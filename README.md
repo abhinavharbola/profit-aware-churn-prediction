@@ -7,10 +7,12 @@ Built entirely on free, open infrastructure: the public [Online Retail II](https
 ## Preview
 
 <p align="center">
-  <img src="assets/manual_entry.png" width="720" alt="Streamlit dashboard showing manual RFM feature entry with sliders and number inputs, a four-stat result row, and a SHAP waterfall explanation">
+  <img src="assets/main_ui.png" width="720" alt="Streamlit dashboard showing manual RFM feature entry with sliders and number inputs, a four-stat result row, and a SHAP waterfall explanation">
   <br>
-  <sub><em>Single Prediction, manual feature entry: churn probability, expected profit, the INTERVENE/DO NOT INTERVENE call, and a per-feature SHAP explanation for it.</em></sub>
+  <sub>Single Prediction, manual feature entry: Main landing UI</sub>
 </p>
+
+Additional screenshots (`complete_ui.png`, `batch_report.png`, `batch_analysis.png`, `manual_entry.png`, `id_lookup.png`) are in [`assets/`](assets/) using that naming convention, one per webapp tab/feature.
 
 ## What this is
 
@@ -92,40 +94,47 @@ The post-cleaning row count isn't hardcoded here since it depends on the actual 
 
 ```
 churn-profit-opt/
-├── .streamlit/
-│   └── config.toml               # Explicit theme, so the app doesn't depend on OS/browser dark-mode
+│
+├── .streamlit/config.toml            # Explicit theme, so the app doesn't depend on OS/browser dark-mode
+
 ├── config.py                    # All constants, paths, financial parameters
 ├── requirements.txt
 ├── .gitignore
+├── README.md
+│
 ├── scripts/
-│   ├── run_pipeline.py          # End-to-end training and evaluation script
-│   └── check_threshold_floor.py # Reuses saved artifacts to re-sweep thresholds without retraining
+│   ├── run_pipeline.py             # End-to-end training and evaluation script
+│   └── check_threshold_floor.py    # Reuses saved artifacts to re-sweep thresholds without retraining
+│
 ├── src/
 │   ├── data/
-│   │   ├── cleaner.py           # Missing ID removal, invoice+stockcode cancellation netting
-│   │   └── temporal.py          # Sliding window generator
+│   │   ├── cleaner.py              # Missing ID removal, invoice+stockcode cancellation netting
+│   │   └── temporal.py             # Sliding window generator
 │   ├── features/
-│   │   └── rfm_engineer.py      # RFM + extensions computed per window
+│   │   └── rfm_engineer.py         # RFM + extensions computed per window
 │   ├── modeling/
-│   │   ├── trainer.py           # XGBoost with Optuna tuning and chronological train/validation/test split
-│   │   └── calibrator.py        # Platt scaling / Isotonic regression
-│   ├── evaluation/
-│   │   ├── metrics.py           # PR-AUC, Brier score
-│   │   ├── profit_optimizer.py  # Expected value maximization and baselines
-│   │   └── explainability.py    # SHAP TreeExplainer wrapper used by the dashboard
-├── app/
-│   └── app.py                   # Streamlit interactive dashboard
+│   │   ├── trainer.py              # XGBoost with Optuna tuning and chronological train/validation/test split
+│   │   └── calibrator.py           # Platt scaling / Isotonic regression
+│   └── evaluation/
+│       ├── metrics.py              # PR-AUC, Brier score
+│       ├── profit_optimizer.py     # Expected value maximization and baselines
+│       └── explainability.py       # SHAP TreeExplainer wrapper used by the dashboard
+│
+├── app/app.py                      # Streamlit interactive dashboard
+│
 ├── tests/
-│   ├── test_temporal.py         # sliding window boundaries + churn label correctness
-│   ├── test_rfm_engineer.py     # RFM aggregation math, seasonal_dropoff across all calendar months
-│   ├── test_profit_optimizer.py # threshold sweep, argmax, compute_avg_monthly_spend scaling
-│   ├── test_temporal_split.py   # chronological ordering and split integrity
-│   └── test_cleaner.py          # cancellation netting, duplicate line items, multi-cancellation sums
+│   ├── test_temporal.py            # sliding window boundaries + churn label correctness
+│   ├── test_rfm_engineer.py        # RFM aggregation math, seasonal_dropoff across all calendar months
+│   ├── test_profit_optimizer.py    # threshold sweep, argmax, compute_avg_monthly_spend scaling
+│   ├── test_temporal_split.py      # chronological ordering and split integrity
+│   └── test_cleaner.py             # cancellation netting, duplicate line items, multi-cancellation sums
+│
 ├── data/
-│   ├── raw/                     # Place online_retail_II.xlsx here
-│   └── processed/               # Generated feature matrices and results
+│   ├── raw/                        # Place online_retail_II.xlsx here
+│   └── processed/                  # Generated feature matrices and results
+│
 ├── artifacts/                      # Serialized model, calibration, threshold, and evaluation artifacts
-└── assets/                      # Dashboard assets for README
+└── assets/                         # Dashboard assets for README
 ```
 
 ## Getting started
@@ -192,5 +201,3 @@ Evaluation here means two different things, and this project doesn't blur them: 
 - Cold-start customers with no transaction history cannot be scored.
 - The locked global threshold shown in Batch Analysis is selected on a dedicated earlier period and is used only for the baseline comparison table; individual scoring decisions still use per-customer expected value.
 - Batch export uses each customer's latest observation window; customers without a recent window are excluded.
-
-
