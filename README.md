@@ -19,7 +19,7 @@ Given the raw transaction file, the pipeline:
 1. Cleans it, drops rows with no customer ID, nets cancellations against the specific line item they credit (not the whole invoice), keeps only positive quantities and prices.
 2. Builds sliding observation/prediction windows per customer, so the same customer contributes multiple labeled examples across different points in time, not one static snapshot.
 3. Engineers 12 RFM-based features per customer per window, and labels churn by whether the customer bought again in the following 90 days.
-4. Tunes XGBoost with Optuna against a customer-grouped validation split, then calibrates and reports on a customer-grouped test split that tuning never saw.
+4. Tunes XGBoost on an earlier chronological validation period, calibrates on that pre-test validation period, selects the profit threshold there, and reports final metrics once on a later test period.
 5. Sweeps decision thresholds to find the one that maximizes net campaign profit, not the one that maximizes accuracy.
 6. Serves all of this through a Streamlit dashboard: single-customer lookup, batch scoring, and a downloadable intervention list, every recommendation traceable back to the expected-value formula behind it.
 
@@ -30,18 +30,18 @@ flowchart TD
     raw[online_retail_II.xlsx] --> clean[Cleaner\nmissing IDs dropped, cancellations netted per line item]
     clean --> windows[Sliding windows\n365d observation / 90d prediction / 30d slide]
     windows --> features[RFM feature engineer\n12 features per customer per window]
-    features --> split[Customer-grouped split\ntrain / val / test, no customer crosses a boundary]
+    features --> split[Chronological split\ntrain / validation / test]
     split -->|train| tune[XGBoost + Optuna\n50 trials, tuned against val only]
     split -->|val| tune
-    tune --> calibrate[Isotonic calibration\nfit on test]
-    split -->|test, untouched by tuning| calibrate
-    calibrate --> metrics[PR-AUC / Brier\non test]
-    calibrate --> profit[Profit optimizer\nthreshold sweep + baselines]
-    profit --> artifacts[(models/ + data/processed/)]
+    split -->|validation| calibrate[Isotonic calibration\npre-test validation period]
+    split -->|validation| profit[Profit optimizer\nthreshold selected before test]
+    split -->|test| metrics[PR-AUC / Brier\nfinal test only]
+    calibrate --> profit
+    profit --> artifacts[(artifacts/ + data/processed/)]
     artifacts --> dashboard[Streamlit dashboard\nSingle Prediction, Batch Analysis, Model Info, Batch Export]
 ```
 
-`scripts/check_threshold_floor.py` runs a reduced path through this same architecture: it reloads the saved model and calibrator, reproduces the identical train/val/test split (deterministic given the fixed `RANDOM_SEED`), and re-sweeps thresholds alone, skipping cleaning, windowing, feature engineering, and tuning entirely. That's only possible because the split is reproducible by construction, not incidental.
+`scripts/check_threshold_floor.py` runs a reduced path through this same architecture: it reloads the saved model and calibrator, reproduces the identical chronological train/validation/test split (deterministic given the fixed `RANDOM_SEED`), and re-sweeps thresholds alone, skipping cleaning, windowing, feature engineering, and tuning entirely. That's only possible because the split is reproducible by construction, not incidental.
 
 ## Expected Value Framework
 
@@ -59,24 +59,24 @@ A customer is targeted only when expected profit is positive. A customer with a 
 |---|---|---|---|
 | Churn classifier | XGBoost (`XGBClassifier`) | `xgboost` | Trained on the natural class imbalance. No SMOTE, no `scale_pos_weight`; post-hoc calibration corrects score distortion instead. |
 | Hyperparameter search | TPE sampler (Optuna's default) | `optuna` | 50 trials, objective is validation-set PR-AUC only. Never sees the test set, by construction (see Guardrails). |
-| Calibration | Isotonic regression | `scikit-learn` | Default; Platt scaling (`LogisticRegression`) is available via `CALIBRATION_METHOD` in `config.py`. Fit on the test set, converts raw scores into the true probabilities the profit formula requires. |
+| Calibration | Isotonic regression | `scikit-learn` | Default; Platt scaling (`LogisticRegression`) is available via `CALIBRATION_METHOD` in `config.py`. Fit on the pre-test validation period, converting raw scores into probabilities used by the profit formula. |
 | Explainability | SHAP `TreeExplainer` | `shap` | Per-customer waterfall plot in the dashboard only. Never touches training, tuning, or thresholding. |
 
-The same isolation principle that keeps an eval judge structurally separate from what it's judging applies here between the validation and test splits: the set that picks the hyperparameters is never the set the final numbers get reported on.
+The evaluation protocol keeps every decision ahead of the final test period: hyperparameters, calibration, and threshold selection all happen before the final test period, using the validation period. The final chronological test period is used only after those choices are locked.
 
 ## Guardrails
 
-- **Split integrity is asserted, not assumed.** `grouped_train_val_test_split()` (`src/modeling/trainer.py`) asserts pairwise customer disjointness across train/val/test on every call; a regression here fails loudly in `tests/test_grouped_split.py`, not silently in a reported number.
-- **The test set is touched exactly once.** Used only for calibration and final metrics, never for tuning. This project reports real numbers only when it can trace them to an actual run against real data, not a placeholder carried over from a leaky split (see Evaluation).
+- **Split integrity is asserted, not assumed.** `temporal_train_val_test_split()` (`src/modeling/trainer.py`) asserts chronological ordering and non-overlapping partitions; regression coverage lives in `tests/test_temporal_split.py`.
+- **The final test set is not used for model selection.** Calibration and threshold selection happen on the pre-test validation period. The test period is used only for final metrics and locked-strategy evaluation.
 - **Cancellation netting is scoped, not global.** A cancellation only decrements the specific `(invoice, stockcode)` it matches, verified against duplicate-line-item and multi-cancellation edge cases in `tests/test_cleaner.py`, not just the common case.
 - **Graceful degradation on missing artifacts.** Every dashboard tab checks for its required model/data files before using them and shows a clear "run the pipeline first" message instead of a raw traceback.
 - **Graceful degradation on a zero or negative baseline.** The profit-lift calculation in Batch Analysis falls back to an absolute currency delta instead of dividing by zero or reporting a nonsensical percentage over a negative base.
 
 ## Artifacts
 
-`scripts/run_pipeline.py` persists everything the dashboard needs to `models/` (`xgb_model.pkl`, `calibrator.pkl`, `feature_names.pkl`, `calibration_method.pkl`) and `data/processed/` (`feature_matrix.pkl`, `profit_comparison.csv`, `threshold_analysis.csv`). `app/app.py` only ever reads these; it never retrains.
+`scripts/run_pipeline.py` persists everything the dashboard needs to `artifacts/` (`xgb_model.pkl`, `calibrator.pkl`, `feature_names.pkl`, `calibration_method.pkl`, `optimal_threshold.pkl`, `metrics.pkl`, `split_metadata.pkl`) and `data/processed/` (`feature_matrix.pkl`, `profit_comparison.csv`, `threshold_analysis.csv`). `app/app.py` only ever reads these; it never retrains.
 
-Re-running the pipeline overwrites all of the above in place. There's no versioning and no run history kept, if you want to compare two configurations, save a copy of `data/processed/` and `models/` before re-running with different `config.py` values.
+Re-running the pipeline overwrites all of the above in place. There's no versioning and no run history kept, if you want to compare two configurations, save a copy of `data/processed/` and `artifacts/` before re-running with different `config.py` values.
 
 ## Data Integrity
 
@@ -107,7 +107,7 @@ churn-profit-opt/
 │   ├── features/
 │   │   └── rfm_engineer.py      # RFM + extensions computed per window
 │   ├── modeling/
-│   │   ├── trainer.py           # XGBoost with Optuna tuning, customer-grouped train/val/test split
+│   │   ├── trainer.py           # XGBoost with Optuna tuning and chronological train/validation/test split
 │   │   └── calibrator.py        # Platt scaling / Isotonic regression
 │   ├── evaluation/
 │   │   ├── metrics.py           # PR-AUC, Brier score
@@ -119,12 +119,12 @@ churn-profit-opt/
 │   ├── test_temporal.py         # sliding window boundaries + churn label correctness
 │   ├── test_rfm_engineer.py     # RFM aggregation math, seasonal_dropoff across all calendar months
 │   ├── test_profit_optimizer.py # threshold sweep, argmax, compute_avg_monthly_spend scaling
-│   ├── test_grouped_split.py    # pairwise train/val/test disjointness, every row assigned once
+│   ├── test_temporal_split.py   # chronological ordering and split integrity
 │   └── test_cleaner.py          # cancellation netting, duplicate line items, multi-cancellation sums
 ├── data/
 │   ├── raw/                     # Place online_retail_II.xlsx here
 │   └── processed/               # Generated feature matrices and results
-├── models/                      # Serialized model, calibrator, feature names
+├── artifacts/                      # Serialized model, calibration, threshold, and evaluation artifacts
 └── assets/                      # Dashboard assets for README
 ```
 
@@ -153,14 +153,14 @@ churn-profit-opt/
    | `MONTHS_REVENUE_SAVED` | 3 | Revenue horizon if customer is retained |
    | `OPTUNA_TRIALS` | 50 | Number of hyperparameter search trials |
    | `CALIBRATION_METHOD` | isotonic | isotonic or platt |
-   | `VALIDATION_SIZE` | 0.2 | Fraction of customers used for Optuna's tuning objective |
-   | `TEST_SIZE` | 0.2 | Fraction of customers held out completely from tuning |
+   | `VALIDATION_SIZE` | 0.2 | Fraction of chronological windows used before the final test period |
+   | `TEST_SIZE` | 0.2 | Final chronological test fraction |
 
 ## Running it
 
 ```bash
-python scripts/run_pipeline.py     # cleans, tunes XGBoost, calibrates, saves artifacts to models/ and data/processed/
-pytest tests/ -v                   # 33 tests, offline, small synthetic fixtures, no dataset needed
+python scripts/run_pipeline.py     # cleans, tunes, calibrates, selects threshold, evaluates, and saves artifacts
+pytest tests/ -v                   # 31 tests, offline, small synthetic fixtures, no dataset needed
 streamlit run app/app.py           # dashboard; needs the artifacts from the pipeline run above
 ```
 
@@ -170,35 +170,27 @@ The dashboard has four tabs. **Single Prediction** takes manual RFM input or a c
 
 Evaluation here means two different things, and this project doesn't blur them: whether the code is correct (unit tests), and whether the model is actually good (held-out metrics). Conflating them is how leakage bugs like the one below hide for a while.
 
-- **Unit tests** (`tests/`, `pytest tests/ -v`) run offline against small synthetic fixtures and check code correctness, not model quality: sliding-window boundaries, RFM aggregation math, the profit formula's arithmetic, cancellation-netting edge cases, and split disjointness. 33 tests total, see the file-by-file breakdown in [Project Structure](#project-structure).
+- **Unit tests** (`tests/`, `pytest tests/ -v`) run offline against small synthetic fixtures and check code correctness, not model quality: sliding-window boundaries, RFM aggregation math, the profit formula's arithmetic, cancellation-netting edge cases, and split disjointness. 31 tests total, see the file-by-file breakdown in [Project Structure](#project-structure).
 - **Model quality** is PR-AUC, Brier score, and net profit, computed once on the held-out test split described in Models and Guardrails above, using `scripts/run_pipeline.py`. PR-AUC rather than ROC-AUC on purpose: ROC-AUC inflates performance on class-imbalanced data like this by rewarding correct ranking of the abundant negative class.
 - **Those numbers, on the real dataset:**
 
   | Metric | Value |
   |---|---|
-  | PR-AUC (held-out test) | 0.8233 |
-  | Brier score (held-out test) | 0.1781 |
-  | Optimal threshold | 0.02 |
+  | PR-AUC (final temporal test) | generated by the pipeline |
+  | Brier score (final temporal test) | generated by the pipeline |
+  | Locked profit threshold | selected on threshold-selection split |
 
-  | Strategy | Total Interventions | True Positives | Wasted Spend (FP) | Net Campaign Profit |
-  |---|---|---|---|---|
-  | Random (20%) | 1,710 | 1,061 | 649 | £21,532 |
-  | Default Threshold (0.5) | 6,400 | 4,724 | 1,676 | £60,063 |
-  | Profit-Optimized (0.02) | 8,368 | 5,294 | 3,074 | £100,998 |
-
-  A previous revision of this README reported PR-AUC 0.909 and a profit table from a split that let the same customer leak between train and validation, numbers that were real outputs but measured the wrong thing. The split is now fixed and verified by `tests/test_grouped_split.py`, and the table above is from an actual `scripts/run_pipeline.py` run against the real dataset, not a re-hash of the old, leaky figures.
-
-  The optimal threshold of 0.02 was specifically checked against a wider, log-spaced sweep down to 0.0001 (`scripts/check_threshold_floor.py`) to rule out the same search-boundary artifact that caused the original 0.1 finding: net profit is flat from 0.0001 to 0.01 (isotonic calibration maps that whole range to the same set of customers), rises to its peak at 0.02, then declines monotonically from 0.08 onward. Profit is lower on both sides of 0.02, the signature of a genuine local maximum, not a boundary effect. The 8,368-intervention, £100,998 result at threshold 0.02 was independently reproduced twice, once from the full pipeline run and once from the standalone threshold check reusing the same saved model against the same deterministically-reconstructed test split, and the two agree exactly.
-
-  Expect these exact figures to shift on a re-run with a different `RANDOM_SEED`, a different `data/raw/online_retail_II.xlsx` snapshot, or after any change to `config.py`'s financial assumptions; they are not fixed constants of the method.
+  The exact figures are intentionally generated at runtime. They will change with the data snapshot, random seed, temporal boundaries, model configuration, and financial assumptions. `scripts/check_threshold_floor.py` rechecks the threshold sweep on the dedicated threshold-selection period without touching the final test period.
 
 
 ## Known limitations
 
 - Cancellation matching's `C`-prefix convention is a mitigation, not a guarantee; see Data Integrity above.
-- The three-way split can't stratify by churn label (a `GroupShuffleSplit` limitation), and splitting three ways shrinks each set further than a two-way split would. With a few thousand customers this is usually minor but hasn't been measured against the real dataset.
+- Temporal evaluation gives up customer-disjoint partitions because the same customer can legitimately be observed at earlier and later forecast times. The final test period is strictly later than the training and validation periods. Because this dataset yields relatively few sliding windows, a 90-day purge would leave too little history for a useful three-way holdout, so the project does not pretend to have one.
 - `monetary_avg` is mean revenue per transaction line item, not per order/invoice; the dashboard labels it explicitly to avoid implying true average order value.
 - The intervention success rate is a configurable constant, not a learned parameter; in production this would come from A/B testing.
 - Cold-start customers with no transaction history cannot be scored.
-- The single global optimal threshold shown in Batch Analysis is used only for that baseline comparison table; it does not drive individual scoring decisions, which use per-customer expected value instead.
+- The locked global threshold shown in Batch Analysis is selected on a dedicated earlier period and is used only for the baseline comparison table; individual scoring decisions still use per-customer expected value.
 - Batch export uses each customer's latest observation window; customers without a recent window are excluded.
+
+

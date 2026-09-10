@@ -4,7 +4,7 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(ROOT_DIR, "data")
 RAW_DATA_PATH = os.path.join(DATA_DIR, "raw", "online_retail_II.xlsx")
 PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
-MODELS_DIR = os.path.join(ROOT_DIR, "models")
+ARTIFACTS_DIR = os.path.join(ROOT_DIR, "artifacts")
 
 OBSERVATION_WINDOW_DAYS = 365
 PREDICTION_WINDOW_DAYS = 90

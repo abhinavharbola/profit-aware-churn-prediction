@@ -78,3 +78,6 @@ def evaluate_random_baseline(y_true, y_prob, avg_monthly_spend, fraction):
 def evaluate_default_baseline(y_true, y_prob, avg_monthly_spend, threshold=0.5):
     predictions = (y_prob >= threshold).astype(int)
     return _evaluate(y_true, predictions, avg_monthly_spend)
+
+
+

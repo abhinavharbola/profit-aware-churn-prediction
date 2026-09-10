@@ -85,3 +85,6 @@ def test_revenue_computed_after_netting():
 
     row_a = result[(result["invoice"] == "536365") & (result["stockcode"] == "A")].iloc[0]
     assert row_a["revenue"] == 7 * 2.0
+
+
+

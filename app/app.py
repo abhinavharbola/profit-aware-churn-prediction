@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import COST_OF_OFFER, INTERVENTION_SUCCESS_RATE, MONTHS_REVENUE_SAVED, MODELS_DIR, PROCESSED_DIR
+from config import COST_OF_OFFER, INTERVENTION_SUCCESS_RATE, MONTHS_REVENUE_SAVED, ARTIFACTS_DIR, PROCESSED_DIR
 from src.evaluation.explainability import get_tree_explainer, compute_shap_explanation
 from src.evaluation.profit_optimizer import compute_expected_profit, compute_avg_monthly_spend
 
@@ -40,8 +40,9 @@ html, body, [class*="css"], [data-testid="stAppViewContainer"], [data-testid="st
     background-color: {BG};
 }}
 
-#MainMenu, footer, header {{ visibility: hidden; }}
-div[data-testid="stToolbar"] {{ visibility: hidden; }}
+#MainMenu, footer {{ visibility: hidden; }}
+header {{ background-color: transparent; }}
+
 
 .block-container {{
     padding-top: 2rem;
@@ -180,6 +181,37 @@ p, span, div, label, li {{
     color: {INK};
 }}
 
+.info-card {{
+    background-color: {PANEL};
+    border: 1px solid {LINE};
+    padding: 1.05rem 1.15rem;
+    margin-bottom: 1rem;
+}}
+
+.info-card-title {{
+    font-family: 'Source Serif 4', serif;
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: {INK} !important;
+    padding-bottom: 0.55rem;
+    margin-bottom: 0.15rem;
+    border-bottom: 1px solid {LINE};
+}}
+
+.info-card-subtitle {{
+    font-size: 0.78rem;
+    color: {INK_SOFT} !important;
+    margin: 0.45rem 0 0.7rem 0;
+}}
+
+.info-card .breakdown-row {{
+    padding: 0.48rem 0;
+}}
+
+.info-card .formula-panel {{
+    margin: 0.8rem 0 0.55rem 0;
+}}
+
 .insight-line {{
     border-left: 3px solid {PROFIT};
     background-color: {PROFIT_SOFT};
@@ -205,27 +237,48 @@ p, span, div, label, li {{
     font-size: 1.02rem;
     font-weight: 500;
     letter-spacing: 0.01em;
-    color: {INK_SOFT} !important;
+    color: {INK} !important;
     padding: 0.5rem 0 0.8rem 0;
     background-color: transparent;
     border-bottom: 2px solid transparent;
 }}
 
 [data-testid="stTabs"] [data-testid="stTab"] p {{
-    color: {INK_SOFT} !important;
+    color: {INK} !important;
     font-size: 1.02rem;
     font-weight: 500;
 }}
 
 [data-testid="stTabs"] [data-testid="stTab"][aria-selected="true"] {{
-    color: {PROFIT} !important;
+    color: {INK} !important;
     font-weight: 600;
-    border-bottom: 2px solid {PROFIT};
+    border-bottom: 2px solid {INK};
 }}
 
 [data-testid="stTabs"] [data-testid="stTab"][aria-selected="true"] p {{
-    color: {PROFIT} !important;
+    color: {INK} !important;
     font-weight: 600;
+}}
+
+button[data-testid="stSidebarCollapseButton"],
+button[data-testid="stSidebarCollapsedControl"] {{
+    visibility: visible !important;
+    opacity: 1 !important;
+    display: flex !important;
+    color: {INK} !important;
+    z-index: 999999 !important;
+}}
+
+button[data-testid="stSidebarCollapseButton"] svg,
+button[data-testid="stSidebarCollapsedControl"] svg {{
+    color: {INK} !important;
+    fill: {INK} !important;
+}}
+
+button[data-testid="stSidebarCollapsedControl"] {{
+    position: fixed !important;
+    top: 0.75rem !important;
+    left: 0.75rem !important;
 }}
 
 .stButton>button, .stDownloadButton>button {{
@@ -302,10 +355,13 @@ code {{
 
 st.markdown(THEME_CSS, unsafe_allow_html=True)
 
-MODEL_PATH = os.path.join(MODELS_DIR, "xgb_model.pkl")
-CALIBRATOR_PATH = os.path.join(MODELS_DIR, "calibrator.pkl")
-FEATURE_NAMES_PATH = os.path.join(MODELS_DIR, "feature_names.pkl")
-CALIBRATION_METHOD_PATH = os.path.join(MODELS_DIR, "calibration_method.pkl")
+MODEL_PATH = os.path.join(ARTIFACTS_DIR, "xgb_model.pkl")
+CALIBRATOR_PATH = os.path.join(ARTIFACTS_DIR, "calibrator.pkl")
+FEATURE_NAMES_PATH = os.path.join(ARTIFACTS_DIR, "feature_names.pkl")
+CALIBRATION_METHOD_PATH = os.path.join(ARTIFACTS_DIR, "calibration_method.pkl")
+OPTIMAL_THRESHOLD_PATH = os.path.join(ARTIFACTS_DIR, "optimal_threshold.pkl")
+METRICS_PATH = os.path.join(ARTIFACTS_DIR, "metrics.pkl")
+SPLIT_METADATA_PATH = os.path.join(ARTIFACTS_DIR, "split_metadata.pkl")
 FEATURE_MATRIX_PATH = os.path.join(PROCESSED_DIR, "feature_matrix.pkl")
 
 FEATURE_LABELS = {
@@ -326,7 +382,7 @@ FEATURE_LABELS = {
 
 @st.cache_resource
 def load_artifacts():
-    if not all(os.path.exists(p) for p in [MODEL_PATH, CALIBRATOR_PATH, FEATURE_NAMES_PATH, CALIBRATION_METHOD_PATH]):
+    if not all(os.path.exists(p) for p in [MODEL_PATH, CALIBRATOR_PATH, FEATURE_NAMES_PATH, CALIBRATION_METHOD_PATH, OPTIMAL_THRESHOLD_PATH, METRICS_PATH, SPLIT_METADATA_PATH]):
         st.error("Model artifacts not found. Run 'python scripts/run_pipeline.py' first.")
         st.stop()
 
@@ -338,13 +394,19 @@ def load_artifacts():
         feature_names = pickle.load(f)
     with open(CALIBRATION_METHOD_PATH, "rb") as f:
         calibration_method = pickle.load(f)
+    with open(OPTIMAL_THRESHOLD_PATH, "rb") as f:
+        optimal_threshold = pickle.load(f)
+    with open(METRICS_PATH, "rb") as f:
+        metrics = pickle.load(f)
+    with open(SPLIT_METADATA_PATH, "rb") as f:
+        split_metadata = pickle.load(f)
 
     def calibrate(scores):
         if calibration_method == "isotonic":
             return calibrator_obj.transform(scores)
         return calibrator_obj.predict_proba(np.array(scores).reshape(-1, 1))[:, 1]
 
-    return model, calibrate, feature_names
+    return model, calibrate, feature_names, optimal_threshold, metrics, split_metadata
 
 
 @st.cache_data
@@ -449,7 +511,7 @@ with st.sidebar:
         unsafe_allow_html=True
     )
 
-model, calibrate, feature_names = load_artifacts()
+model, calibrate, feature_names, optimal_threshold, metrics, split_metadata = load_artifacts()
 
 tab1, tab2, tab3, tab4 = st.tabs(["Single prediction", "Batch analysis", "Model info", "Batch export"])
 
@@ -631,19 +693,16 @@ with tab2:
 
         if os.path.exists(THRESHOLD_PATH):
             threshold_df = pd.read_csv(THRESHOLD_PATH)
-            optimal_threshold = threshold_df.loc[threshold_df["net_profit"].idxmax(), "threshold"]
-
             st.markdown('<div class="section-label">Threshold sweep</div>', unsafe_allow_html=True)
             st.plotly_chart(render_threshold_chart(threshold_df, optimal_threshold), width='stretch')
-            st.caption("Net profit at each candidate threshold. The marker sits at the argmax.")
+            st.caption(f"Threshold sweep on the pre-test validation period. Locked threshold: {optimal_threshold:.2f}. The final test set is not used to select it.")
     else:
         st.info("Profit comparison data not found. Run 'python scripts/run_pipeline.py' first.")
 
 with tab3:
-    info_col1, info_col2 = st.columns(2)
+    info_col1, info_col2 = st.columns(2, gap="medium")
 
     with info_col1:
-        st.markdown('<div class="section-label">Feature descriptions</div>', unsafe_allow_html=True)
         feature_descriptions = {
             "recency": "Days since last purchase",
             "frequency": "Unique invoices in window",
@@ -662,25 +721,51 @@ with tab3:
             f'<div class="breakdown-row"><span>{feat}</span><span style="color:{INK_SOFT};">{desc}</span></div>'
             for feat, desc in feature_descriptions.items()
         )
-        st.markdown(f'<div class="ledger-panel">{rows_html}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="info-card">'
+            f'<div class="info-card-title">Feature descriptions</div>'
+            f'<div class="info-card-subtitle">The 12 RFM-based inputs used by the model.</div>'
+            f'{rows_html}'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            f'<div class="info-card">'
+            f'<div class="info-card-title">Profit formula</div>'
+            f'<div class="formula-panel">'
+            f'<span style="font-family:IBM Plex Mono, monospace; font-size:1.05rem; color:{INK};">'
+            f'E[&Delta;Profit] = p<sub>i</sub> &middot; (&gamma; &middot; V<sub>i</sub>) &minus; C'
+            f'</span>'
+            f'</div>'
+            f'<div style="font-size:0.78rem; line-height:1.5; color:{INK_SOFT};">'
+            f'p: calibrated churn probability · γ: success rate · V: avg monthly spend × 3 · C: cost'
+            f'</div>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
 
     with info_col2:
-        st.markdown('<div class="section-label">Architecture</div>', unsafe_allow_html=True)
         architecture_rows = {
             "Model": "XGBoost, natural class imbalance",
-            "Split": "customer-grouped, no window leakage",
-            "Calibration": "isotonic regression",
+            "Split": "chronological train/validation/test periods",
+            "Calibration": "pre-test validation period",
             "Features": "12 RFM-based",
             "Window": "12-month observation, 90-day prediction",
-            "Tuning": "50 Optuna trials on PR-AUC",
+            "Tuning": "50 Optuna trials on earlier validation data",
         }
         rows_html = "".join(
             f'<div class="breakdown-row"><span>{label}</span><span style="color:{INK_SOFT};">{value}</span></div>'
             for label, value in architecture_rows.items()
         )
-        st.markdown(f'<div class="ledger-panel">{rows_html}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="info-card">'
+            f'<div class="info-card-title">Architecture</div>'
+            f'{rows_html}'
+            f'</div>',
+            unsafe_allow_html=True
+        )
 
-        st.markdown('<div class="section-label">Configurable parameters</div>', unsafe_allow_html=True)
         config_rows = {
             "Intervention cost": f"£{COST_OF_OFFER}",
             "Success rate": f"{INTERVENTION_SUCCESS_RATE:.0%}",
@@ -690,19 +775,25 @@ with tab3:
             f'<div class="breakdown-row"><span>{label}</span><span style="color:{INK_SOFT};">{value}</span></div>'
             for label, value in config_rows.items()
         )
-        st.markdown(f'<div class="ledger-panel">{rows_html}</div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-label" style="margin-top:0.6rem;">Profit formula</div>', unsafe_allow_html=True)
         st.markdown(
-            f'''
-            <div class="formula-panel">
-                <span style="font-family:'IBM Plex Mono', monospace; font-size:1.05rem; color:{INK};">
-                    E[&Delta;Profit] = p<sub>i</sub> &middot; (&gamma; &middot; V<sub>i</sub>) &minus; C
-                </span>
-            </div>
-            ''',
+            f'<div class="info-card">'
+            f'<div class="info-card-title">Configurable parameters</div>'
+            f'{rows_html}'
+            f'</div>',
             unsafe_allow_html=True
         )
-        st.caption("p: calibrated churn probability · γ: success rate · V: avg monthly spend × 3 · C: cost")
+
+        st.markdown(
+            f'<div class="info-card">'
+            f'<div class="info-card-title">Held-out evaluation</div>'
+            f'<div class="breakdown-row"><span>PR-AUC</span><span class="amount">{metrics["pr_auc"]:.4f}</span></div>'
+            f'<div class="breakdown-row"><span>Brier score</span><span class="amount">{metrics["brier_score"]:.4f}</span></div>'
+            f'<div class="breakdown-row"><span>Locked threshold</span><span class="amount">{optimal_threshold:.2f}</span></div>'
+            f'<div class="breakdown-row"><span>Evaluation split</span><span style="color:{INK_SOFT};">Final chronological test set</span></div>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
 
 with tab4:
     feature_df = load_feature_matrix()
@@ -795,3 +886,5 @@ with tab4:
                     file_name="all_customers_scored.csv",
                     mime="text/csv"
                 )
+
+

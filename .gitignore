@@ -1,10 +1,17 @@
-venv/
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
+.venv/
+venv/
+.env
+.DS_Store
+
+# Local dataset and generated outputs
 data/raw/*
-!data/raw/.gitkeep
 data/processed/*
+artifacts/*
+
+# Keep directory placeholders
+!data/raw/.gitkeep
 !data/processed/.gitkeep
-models/*
-!models/.gitkeep
+!artifacts/.gitkeep

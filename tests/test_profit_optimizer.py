@@ -88,3 +88,6 @@ def test_avg_monthly_spend_handles_series_input():
     totals = pd.Series([1200.0, 600.0, 0.0])
     result = compute_avg_monthly_spend(totals, observation_days=365)
     assert list(result.round(4)) == list((totals / (365 / 30.44)).round(4))
+
+
+
