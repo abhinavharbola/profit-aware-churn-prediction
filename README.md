@@ -12,7 +12,7 @@ Built entirely on free, open infrastructure: the public [Online Retail II](https
   <sub>Single Prediction, manual feature entry: Main landing UI</sub>
 </p>
 
-Additional screenshots (`complete_ui.png`, `batch_report.png`, `batch_analysis.png`, `manual_entry.png`, `id_lookup.png`) are in [`assets/`](assets/) using that naming convention, one per webapp tab/feature.
+Additional screenshots in [`assets/`](assets/), one per tab/feature.
 
 ## What this is
 
@@ -195,9 +195,8 @@ Evaluation here means two different things, and this project doesn't blur them: 
 ## Known limitations
 
 - Cancellation matching's `C`-prefix convention is a mitigation, not a guarantee; see Data Integrity above.
-- Temporal evaluation gives up customer-disjoint partitions because the same customer can legitimately be observed at earlier and later forecast times. The final test period is strictly later than the training and validation periods. Because this dataset yields relatively few sliding windows, a 90-day purge would leave too little history for a useful three-way holdout, so the project does not pretend to have one.
+- Temporal evaluation gives up customer-disjoint partitions because the same customer can legitimately be observed at earlier and later forecast times. The final test period is strictly later than the training and validation periods.
 - `monetary_avg` is mean revenue per transaction line item, not per order/invoice; the dashboard labels it explicitly to avoid implying true average order value.
 - The intervention success rate is a configurable constant, not a learned parameter; in production this would come from A/B testing.
 - Cold-start customers with no transaction history cannot be scored.
 - The locked global threshold shown in Batch Analysis is selected on a dedicated earlier period and is used only for the baseline comparison table; individual scoring decisions still use per-customer expected value.
-- Batch export uses each customer's latest observation window; customers without a recent window are excluded.
