@@ -86,6 +86,3 @@ def run_cleaning():
     df_raw = load_raw_data()
     df_clean = clean_data(df_raw)
     return df_clean
-
-
-

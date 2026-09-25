@@ -1,9 +1,8 @@
-import pandas as pd
 import xgboost as xgb
 import optuna
 from sklearn.metrics import average_precision_score
 from config import (
-    RANDOM_SEED, OPTUNA_TRIALS, VALIDATION_SIZE, TEST_SIZE
+    RANDOM_SEED, OPTUNA_TRIALS, VALIDATION_SIZE, TEST_SIZE, EARLY_STOPPING_ROUNDS
 )
 
 
@@ -17,7 +16,7 @@ def prepare_data(feature_df):
 
 
 def temporal_train_val_test_split(
-    X, y, groups, obs_end, validation_size=VALIDATION_SIZE,
+    X, y, obs_end, validation_size=VALIDATION_SIZE,
     test_size=TEST_SIZE
 ):
     if not 0 < validation_size < 1 or not 0 < test_size < 1:
@@ -71,7 +70,6 @@ def temporal_train_val_test_split(
     )
 
 
-
 def objective(trial, X_train, y_train, X_val, y_val):
     params = {
         "n_estimators": trial.suggest_int("n_estimators", 100, 800),
@@ -83,6 +81,8 @@ def objective(trial, X_train, y_train, X_val, y_val):
         "gamma": trial.suggest_float("gamma", 0, 5),
         "reg_alpha": trial.suggest_float("reg_alpha", 0, 5),
         "reg_lambda": trial.suggest_float("reg_lambda", 0, 5),
+        "eval_metric": "aucpr",
+        "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
         "random_state": RANDOM_SEED,
         "n_jobs": -1,
         "verbosity": 0
@@ -90,21 +90,25 @@ def objective(trial, X_train, y_train, X_val, y_val):
     model = xgb.XGBClassifier(**params)
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
     y_pred = model.predict_proba(X_val)[:, 1]
+    trial.set_user_attr("best_iteration", model.best_iteration)
     return average_precision_score(y_val, y_pred)
 
 
-def train_model(X, y, groups, feature_cols, obs_end):
+def train_model(X, y, feature_cols, obs_end, n_trials=OPTUNA_TRIALS):
     X_train, X_val, X_test, y_train, y_val, y_test, train_idx, val_idx, test_idx = \
-        temporal_train_val_test_split(X, y, groups, obs_end)
+        temporal_train_val_test_split(X, y, obs_end)
 
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=RANDOM_SEED))
     study.optimize(
         lambda trial: objective(trial, X_train, y_train, X_val, y_val),
-        n_trials=OPTUNA_TRIALS,
+        n_trials=n_trials,
         show_progress_bar=True
     )
 
     best_params = study.best_params
+    best_iteration = study.best_trial.user_attrs.get("best_iteration")
+    if best_iteration is not None:
+        best_params["n_estimators"] = best_iteration + 1
     best_params.update({
         "random_state": RANDOM_SEED,
         "n_jobs": -1,
@@ -112,9 +116,6 @@ def train_model(X, y, groups, feature_cols, obs_end):
     })
 
     model = xgb.XGBClassifier(**best_params)
-    X_final = pd.concat([X_train, X_val], ignore_index=True)
-    y_final = pd.concat([y_train, y_val], ignore_index=True)
-    model.fit(X_final, y_final, verbose=False)
+    model.fit(X_train, y_train, verbose=False)
 
-    return model, study, feature_cols, X_val, y_val, X_test, y_test, val_idx, test_idx
-
+    return model, study, feature_cols, X_train, y_train, X_val, y_val, X_test, y_test, train_idx, val_idx, test_idx

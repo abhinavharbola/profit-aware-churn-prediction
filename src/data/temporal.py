@@ -39,6 +39,3 @@ def generate_windows(df, observation_days=OBSERVATION_WINDOW_DAYS,
         window_start += timedelta(days=slide_days)
 
     return windows
-
-
-

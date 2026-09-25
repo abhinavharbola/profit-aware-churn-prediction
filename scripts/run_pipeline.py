@@ -41,12 +41,13 @@ feature_df.to_pickle(os.path.join(PROCESSED_DIR, "feature_matrix.pkl"))
 
 print("=== 4. Training XGBoost with chronological train/validation/test splits ===")
 X, y, groups, feature_cols = prepare_data(feature_df)
-model, study, feature_cols, X_val, y_val, X_test, y_test, val_idx, test_idx = train_model(
-    X, y, groups, feature_cols, feature_df["obs_end"]
+model, study, feature_cols, X_train, y_train, X_val, y_val, X_test, y_test, train_idx, val_idx, test_idx = train_model(
+    X, y, feature_cols, feature_df["obs_end"]
 )
 print(f"Best trial PR-AUC (validation set, used for tuning only): {study.best_value:.4f}")
+print(f"Final model trained on {len(X_train)} rows (train split only, validation held out for calibration)")
 
-print("=== 5. Calibrating probabilities (on the pre-test validation period) ===")
+print("=== 5. Calibrating probabilities (on the pre-test validation period the final model never trained on) ===")
 calibration_func, calibrator = calibrate_probabilities(model, X_val, y_val)
 
 print("=== 6. Selecting the profit threshold (on the pre-test validation period) ===")
@@ -121,9 +122,12 @@ artifacts = {
     "metrics.pkl": {"pr_auc": metrics["pr_auc"], "brier_score": metrics["brier_score"]},
     "split_metadata.pkl": {
         "method": "chronological_train_validation_test",
+        "final_model_trained_on": "train_only",
         "calibration_and_threshold_selection_period": "validation",
+        "train_rows": len(train_idx),
         "validation_rows": len(val_idx),
         "test_rows": len(test_idx),
+        "train_val_disjoint": bool(len(set(train_idx) & set(val_idx)) == 0),
         "validation_end": str(feature_df.iloc[val_idx]["obs_end"].max()),
         "test_start": str(feature_df.iloc[test_idx]["obs_end"].min())
     }

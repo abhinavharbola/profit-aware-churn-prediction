@@ -25,6 +25,3 @@ def calibrate_probabilities(model, X_calibration, y_calibration, method=CALIBRAT
         raise ValueError(f"Unknown calibration method: {method}")
 
     return calibration_func, calibrator
-
-
-
