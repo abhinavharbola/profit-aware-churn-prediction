@@ -9,6 +9,3 @@ streamlit>=1.40.0
 openpyxl>=3.1.0
 plotly>=5.15.0
 pytest>=7.4.0
-
-
-

@@ -95,6 +95,3 @@ def test_no_customer_leaks_across_window_rows():
 
     assert set(rfm["customer_id"]) == {1, 2}
     assert len(rfm) == rfm["customer_id"].nunique()
-
-
-

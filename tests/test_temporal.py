@@ -48,6 +48,3 @@ def test_no_windows_when_span_too_short():
     df = _make_transactions()
     windows = generate_windows(df, observation_days=1000, prediction_days=200, slide_days=30)
     assert windows == []
-
-
-

@@ -24,7 +24,7 @@ def _synthetic_feature_df():
 def test_temporal_split_assigns_every_row_once_and_is_ordered():
     feature_df = _synthetic_feature_df()
     X, y, groups, feature_cols = prepare_data(feature_df)
-    result = temporal_train_val_test_split(X, y, groups, feature_df["obs_end"])
+    result = temporal_train_val_test_split(X, y, feature_df["obs_end"])
     train_idx, val_idx, test_idx = result[-3:]
 
     assert len(train_idx) + len(val_idx) + len(test_idx) == len(X)
@@ -38,7 +38,7 @@ def test_temporal_split_assigns_every_row_once_and_is_ordered():
 def test_temporal_split_has_no_row_overlap():
     feature_df = _synthetic_feature_df()
     X, y, groups, feature_cols = prepare_data(feature_df)
-    result = temporal_train_val_test_split(X, y, groups, feature_df["obs_end"])
+    result = temporal_train_val_test_split(X, y, feature_df["obs_end"])
     train_idx, val_idx, test_idx = result[-3:]
 
     memberships = np.concatenate([train_idx, val_idx, test_idx])

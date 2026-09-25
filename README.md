@@ -33,10 +33,13 @@ flowchart TD
     clean --> windows[Sliding windows\n365d observation / 90d prediction / 30d slide]
     windows --> features[RFM feature engineer\n12 features per customer per window]
     features --> split[Chronological split\ntrain / validation / test]
-    split -->|train| tune[XGBoost + Optuna\n50 trials, tuned against val only]
-    split -->|val| tune
-    split -->|validation| calibrate[Isotonic calibration\npre-test validation period]
-    split -->|validation| profit[Profit optimizer\nthreshold selected before test]
+    split -->|train| tune[XGBoost + Optuna\n50 trials, early-stopped against val, tuned against val only]
+    split -->|val, early stopping only| tune
+    tune --> finalfit[Final model refit\ntrain split only, val never trained on]
+    split -->|validation, held out from training| calibrate[Isotonic calibration\npre-test validation period]
+    finalfit --> calibrate
+    finalfit --> profit[Profit optimizer\nthreshold selected before test]
+    split -->|validation, held out from training| profit
     split -->|test| metrics[PR-AUC / Brier\nfinal test only]
     calibrate --> profit
     profit --> artifacts[(artifacts/ + data/processed/)]
@@ -59,8 +62,8 @@ A customer is targeted only when expected profit is positive. A customer with a 
 
 | Role | Model | Library | Notes |
 |---|---|---|---|
-| Churn classifier | XGBoost (`XGBClassifier`) | `xgboost` | Trained on the natural class imbalance. No SMOTE, no `scale_pos_weight`; post-hoc calibration corrects score distortion instead. |
-| Hyperparameter search | TPE sampler (Optuna's default) | `optuna` | 50 trials, objective is validation-set PR-AUC only. Never sees the test set, by construction (see Guardrails). |
+| Churn classifier | XGBoost (`XGBClassifier`) | `xgboost` | Trained on the natural class imbalance. No SMOTE, no `scale_pos_weight`; post-hoc calibration corrects score distortion instead. The final model fits on the train split only, never on validation, so validation stays genuinely held out for calibration and threshold selection. |
+| Hyperparameter search | TPE sampler (Optuna's default) | `optuna` | 50 trials, objective is validation-set PR-AUC, with `early_stopping_rounds` and `eval_metric="aucpr"` wired to that same validation set so trials actually stop early instead of training to the full suggested `n_estimators` regardless of validation performance. Never sees the test set, by construction (see Guardrails). |
 | Calibration | Isotonic regression | `scikit-learn` | Default; Platt scaling (`LogisticRegression`) is available via `CALIBRATION_METHOD` in `config.py`. Fit on the pre-test validation period, converting raw scores into probabilities used by the profit formula. |
 | Explainability | SHAP `TreeExplainer` | `shap` | Per-customer waterfall plot in the dashboard only. Never touches training, tuning, or thresholding. |
 
@@ -70,6 +73,7 @@ The evaluation protocol keeps every decision ahead of the final test period: hyp
 
 - **Split integrity is asserted, not assumed.** `temporal_train_val_test_split()` (`src/modeling/trainer.py`) asserts chronological ordering and non-overlapping partitions; regression coverage lives in `tests/test_temporal_split.py`.
 - **The final test set is not used for model selection.** Calibration and threshold selection happen on the pre-test validation period. The test period is used only for final metrics and locked-strategy evaluation.
+- **Calibration and thresholding run against data the final model never trained on.** `train_model()` fits the shipped model on the train split only; validation is never folded into that fit. `scripts/run_pipeline.py` records `final_model_trained_on: "train_only"` in `split_metadata.pkl`, and `tests/test_no_calibration_leakage.py` pins this behavior with a regression test that inspects every `XGBClassifier.fit()` call the training path makes. This used to not be true, an earlier version of `train_model()` refit the final model on `train + val` and then calibrated and thresholded against that same `val`, see the bug log at the bottom of this file.
 - **Cancellation netting is scoped, not global.** A cancellation only decrements the specific `(invoice, stockcode)` it matches, verified against duplicate-line-item and multi-cancellation edge cases in `tests/test_cleaner.py`, not just the common case.
 - **Graceful degradation on missing artifacts.** Every dashboard tab checks for its required model/data files before using them and shows a clear "run the pipeline first" message instead of a raw traceback.
 - **Graceful degradation on a zero or negative baseline.** The profit-lift calculation in Batch Analysis falls back to an absolute currency delta instead of dividing by zero or reporting a nonsensical percentage over a negative base.
@@ -113,7 +117,7 @@ churn-profit-opt/
 │   ├── features/
 │   │   └── rfm_engineer.py         # RFM + extensions computed per window
 │   ├── modeling/
-│   │   ├── trainer.py              # XGBoost with Optuna tuning and chronological train/validation/test split
+│   │   ├── trainer.py              # XGBoost with early-stopped Optuna tuning; final model fits on train only
 │   │   └── calibrator.py           # Platt scaling / Isotonic regression
 │   └── evaluation/
 │       ├── metrics.py              # PR-AUC, Brier score
@@ -123,11 +127,12 @@ churn-profit-opt/
 ├── app/app.py                      # Streamlit interactive dashboard
 │
 ├── tests/
-│   ├── test_temporal.py            # sliding window boundaries + churn label correctness
-│   ├── test_rfm_engineer.py        # RFM aggregation math, seasonal_dropoff across all calendar months
-│   ├── test_profit_optimizer.py    # threshold sweep, argmax, compute_avg_monthly_spend scaling
-│   ├── test_temporal_split.py      # chronological ordering and split integrity
-│   └── test_cleaner.py             # cancellation netting, duplicate line items, multi-cancellation sums
+│   ├── test_temporal.py                  # sliding window boundaries + churn label correctness
+│   ├── test_rfm_engineer.py              # RFM aggregation math, seasonal_dropoff across all calendar months
+│   ├── test_profit_optimizer.py          # threshold sweep, argmax, compute_avg_monthly_spend scaling
+│   ├── test_temporal_split.py            # chronological ordering and split integrity
+│   ├── test_cleaner.py                   # cancellation netting, duplicate line items, multi-cancellation sums
+│   └── test_no_calibration_leakage.py    # final model is fit on train only, never on validation
 │
 ├── data/
 │   ├── raw/                        # Place online_retail_II.xlsx here
@@ -169,7 +174,7 @@ churn-profit-opt/
 
 ```bash
 python scripts/run_pipeline.py     # cleans, tunes, calibrates, selects threshold, evaluates, and saves artifacts
-pytest tests/ -v                   # 31 tests, offline, small synthetic fixtures, no dataset needed
+pytest tests/ -v                   # 33 tests, offline, small synthetic fixtures, no dataset needed
 streamlit run app/app.py           # dashboard; needs the artifacts from the pipeline run above
 ```
 
@@ -179,7 +184,7 @@ The dashboard has four tabs. **Single Prediction** takes manual RFM input or a c
 
 Evaluation here means two different things, and this project doesn't blur them: whether the code is correct (unit tests), and whether the model is actually good (held-out metrics). Conflating them is how leakage bugs like the one below hide for a while.
 
-- **Unit tests** (`tests/`, `pytest tests/ -v`) run offline against small synthetic fixtures and check code correctness, not model quality: sliding-window boundaries, RFM aggregation math, the profit formula's arithmetic, cancellation-netting edge cases, and split disjointness. 31 tests total, see the file-by-file breakdown in [Project Structure](#project-structure).
+- **Unit tests** (`tests/`, `pytest tests/ -v`) run offline against small synthetic fixtures and check code correctness, not model quality: sliding-window boundaries, RFM aggregation math, the profit formula's arithmetic, cancellation-netting edge cases, split disjointness, and (as of the bug log entry below) that the final model is never fit on the rows used to calibrate or threshold it. 33 tests total, see the file-by-file breakdown in [Project Structure](#project-structure).
 - **Model quality** is PR-AUC, Brier score, and net profit, computed once on the held-out test split described in Models and Guardrails above, using `scripts/run_pipeline.py`. PR-AUC rather than ROC-AUC on purpose: ROC-AUC inflates performance on class-imbalanced data like this by rewarding correct ranking of the abundant negative class.
 - **Those numbers, on the real dataset:**
 
@@ -189,7 +194,7 @@ Evaluation here means two different things, and this project doesn't blur them: 
   | Brier score (final temporal test) | generated by the pipeline |
   | Locked profit threshold | selected on threshold-selection split |
 
-  The exact figures are intentionally generated at runtime. They will change with the data snapshot, random seed, temporal boundaries, model configuration, and financial assumptions. `scripts/check_threshold_floor.py` rechecks the threshold sweep on the dedicated threshold-selection period without touching the final test period.
+  The exact figures are intentionally generated at runtime. They will change with the data snapshot, random seed, temporal boundaries, model configuration, and financial assumptions. `scripts/check_threshold_floor.py` rechecks the threshold sweep on the dedicated threshold-selection period without touching the final test period, and it also checks `split_metadata.pkl` to confirm the model that produced those artifacts was trained on the train split alone. That's still a determinism and provenance check, not a substitute for the dedicated leakage regression test in `tests/test_no_calibration_leakage.py`, reproducing a sweep proves the sweep is stable given its inputs, it doesn't independently prove those inputs were leak-free.
 
 
 ## Known limitations
@@ -200,3 +205,11 @@ Evaluation here means two different things, and this project doesn't blur them: 
 - The intervention success rate is a configurable constant, not a learned parameter; in production this would come from A/B testing.
 - Cold-start customers with no transaction history cannot be scored.
 - The locked global threshold shown in Batch Analysis is selected on a dedicated earlier period and is used only for the baseline comparison table; individual scoring decisions still use per-customer expected value.
+
+## Bug log
+
+**Calibration and threshold selection leaked into the final model's own training data.** `train_model()` tuned hyperparameters correctly (Optuna's objective only ever saw `X_train`/`X_val`), but then refit the final shipped model on `X_train` concatenated with `X_val`. `run_pipeline.py` then fit the calibrator and selected the profit threshold using `model.predict_proba(X_val)`, the same `X_val` that model had just trained on. The final PR-AUC/Brier numbers were unaffected, `X_test` was never touched by anything upstream of the final evaluation step, but the calibrator and the locked decision threshold, the two pieces that turn a raw score into an actual INTERVENE/DO NOT INTERVENE call, were both fit against optimistic, in-sample scores rather than genuine held-out generalization.
+
+Fix: the final model now fits on `X_train` alone. `X_val` stays genuinely unseen by that model and is used only for calibration and threshold selection, exactly the way the README's own stated evaluation protocol always claimed it worked. As a side effect of no longer relying on validation data to pad out the final training set, the Optuna objective now uses real early stopping (`early_stopping_rounds` + `eval_metric="aucpr"`, both previously accepted as no-op-adjacent constructor arguments that had no `early_stopping_rounds` to actually trigger on), and the final model's `n_estimators` is set to the best trial's actual early-stopped iteration count rather than the raw suggested upper bound. `tests/test_no_calibration_leakage.py` pins this by spying on every `XGBClassifier.fit()` call `train_model()` makes and asserting the final call trains on exactly `len(X_train)` rows, never `len(X_train) + len(X_val)`.
+
+This replaced the cancellation-matching bug referenced above in Data Integrity, an earlier version of the netting logic in `src/data/cleaner.py` matched a cancellation to the wrong `(invoice, stockcode)` pair in cases with duplicate line items, corrupting an unrelated row's quantity rather than just leaving a non-conforming refund unmatched. The current row-scoped `(invoice, customer_id, stockcode)` merge in `clean_data()`, and the duplicate-line and multi-cancellation regression tests in `tests/test_cleaner.py`, are what replaced it.
