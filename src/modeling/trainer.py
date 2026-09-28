@@ -1,8 +1,12 @@
+import warnings
+import numpy as np
+import pandas as pd
 import xgboost as xgb
 import optuna
 from sklearn.metrics import average_precision_score
 from config import (
-    RANDOM_SEED, OPTUNA_TRIALS, VALIDATION_SIZE, TEST_SIZE, EARLY_STOPPING_ROUNDS
+    RANDOM_SEED, OPTUNA_TRIALS, VALIDATION_SIZE, TEST_SIZE,
+    EARLY_STOPPING_ROUNDS, EMBARGO_DAYS
 )
 
 
@@ -17,36 +21,74 @@ def prepare_data(feature_df):
 
 def temporal_train_val_test_split(
     X, y, obs_end, validation_size=VALIDATION_SIZE,
-    test_size=TEST_SIZE
+    test_size=TEST_SIZE, embargo_days=EMBARGO_DAYS
 ):
     if not 0 < validation_size < 1 or not 0 < test_size < 1:
         raise ValueError("Validation and test sizes must be between 0 and 1.")
     if validation_size + test_size >= 1:
         raise ValueError("Validation and test sizes must sum to less than 1.")
+    if embargo_days < 0:
+        raise ValueError("embargo_days must be non-negative.")
 
     dates = obs_end.reset_index(drop=True)
     unique_dates = sorted(dates.dropna().unique())
-    if len(unique_dates) < 6:
+    n = len(unique_dates)
+    if n < 6:
         raise ValueError("At least 6 distinct observation dates are required for a temporal split.")
 
-    n = len(unique_dates)
+    if n > 1:
+        span_days = (pd.Timestamp(unique_dates[-1]) - pd.Timestamp(unique_dates[0])).days
+        typical_gap_days = span_days / (n - 1) if span_days > 0 else 0
+    else:
+        typical_gap_days = 0
+
+    requested_steps = int(np.ceil(embargo_days / typical_gap_days)) if typical_gap_days > 0 else 0
+    embargo_steps = min(requested_steps, max(0, (n - 3) // 2))
+    if embargo_steps < requested_steps:
+        warnings.warn(
+            f"Requested {embargo_days}-day embargo needs {requested_steps} dates per "
+            f"boundary but only {n} distinct observation dates exist; reduced to "
+            f"{embargo_steps}. Label periods across split boundaries may still overlap."
+        )
+
+    n_effective = n - 2 * embargo_steps
+    if n_effective < 3:
+        raise ValueError(
+            f"Only {n} distinct observation dates are available and the "
+            f"{embargo_days}-day embargo needs to reserve {embargo_steps} "
+            "dates at each of the two split boundaries, leaving too few "
+            "dates for a non-empty train/validation/test split. Reduce "
+            "embargo_days, reduce SLIDE_INTERVAL_DAYS to get more (closer "
+            "together) windows, or provide a longer date range."
+        )
+
     train_fraction = 1 - validation_size - test_size
-    train_boundary = min(n - 2, max(1, int(round(n * train_fraction)) - 1))
-    val_boundary = min(n - 1, max(train_boundary + 1, int(round(n * (1 - test_size))) - 1))
+    train_count = min(n_effective - 2, max(1, int(round(n_effective * train_fraction))))
+    val_count = min(n_effective - train_count - 1, max(1, int(round(n_effective * validation_size))))
+    test_count = n_effective - train_count - val_count
+
+    train_boundary = train_count - 1
+    val_start_boundary = train_boundary + embargo_steps + 1
+    val_boundary = val_start_boundary + val_count - 1
+    test_start_boundary = val_boundary + embargo_steps + 1
 
     train_end = unique_dates[train_boundary]
+    val_start_date = unique_dates[val_start_boundary]
     val_end = unique_dates[val_boundary]
+    test_start_date = unique_dates[test_start_boundary]
 
     train_mask = dates <= train_end
-    val_mask = (dates > train_end) & (dates <= val_end)
-    test_mask = dates > val_end
+    val_mask = (dates >= val_start_date) & (dates <= val_end)
+    test_mask = dates >= test_start_date
     masks = [train_mask, val_mask, test_mask]
 
     if any(mask.sum() == 0 for mask in masks):
         counts = [int(mask.sum()) for mask in masks]
         raise ValueError(
-            "Temporal split produced an empty partition. "
-            f"Increase the available history or reduce purge/split sizes. Counts: {counts}"
+            "Temporal split produced an empty partition after reserving the "
+            f"{embargo_days}-day embargo. Increase the available history, "
+            f"reduce validation_size/test_size, or reduce embargo_days. "
+            f"Counts: {counts}"
         )
 
     train_idx = dates.index[train_mask].to_numpy()
@@ -56,8 +98,12 @@ def temporal_train_val_test_split(
     train_dates = dates.iloc[train_idx]
     val_dates = dates.iloc[val_idx]
     test_dates = dates.iloc[test_idx]
-    if not (train_dates.max() < val_dates.min() and val_dates.max() < test_dates.min()):
-        raise AssertionError("Temporal split is not strictly chronological.")
+    min_gap = pd.Timedelta(days=embargo_steps * typical_gap_days)
+    if not (
+        train_dates.max() + min_gap < val_dates.min()
+        and val_dates.max() + min_gap < test_dates.min()
+    ):
+        raise AssertionError("Temporal split does not maintain the required embargo gap.")
 
     return (
         X.iloc[train_idx].reset_index(drop=True),
@@ -97,6 +143,10 @@ def objective(trial, X_train, y_train, X_val, y_val):
 def train_model(X, y, feature_cols, obs_end, n_trials=OPTUNA_TRIALS):
     X_train, X_val, X_test, y_train, y_val, y_test, train_idx, val_idx, test_idx = \
         temporal_train_val_test_split(X, y, obs_end)
+
+    n_purged = len(X) - (len(train_idx) + len(val_idx) + len(test_idx))
+    if n_purged > 0:
+        print(f"Embargo purge: {n_purged} rows near split boundaries excluded from all splits.")
 
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=RANDOM_SEED))
     study.optimize(

@@ -1,6 +1,9 @@
 import numpy as np
 import pandas as pd
-from config import COST_OF_OFFER, INTERVENTION_SUCCESS_RATE, MONTHS_REVENUE_SAVED, OBSERVATION_WINDOW_DAYS
+from config import (
+    COST_OF_OFFER, INTERVENTION_SUCCESS_RATE, MONTHS_REVENUE_SAVED,
+    OBSERVATION_WINDOW_DAYS, RANDOM_SEED
+)
 
 DAYS_PER_MONTH = 30.44
 
@@ -45,13 +48,16 @@ def _evaluate(y_true, predictions, avg_monthly_spend):
     }
 
 
-def find_optimal_threshold(y_true, y_prob, avg_monthly_spend, thresholds=np.arange(0.01, 0.91, 0.01)):
+def find_optimal_threshold(y_true, y_prob, avg_monthly_spend, thresholds=None, round_decimals=2):
+    if thresholds is None:
+        thresholds = np.arange(0.01, 0.91, 0.01)
+
     results = []
 
     for t in thresholds:
         predictions = (y_prob >= t).astype(int)
         row = _evaluate(y_true, predictions, avg_monthly_spend)
-        row["threshold"] = round(t, 2)
+        row["threshold"] = round(t, round_decimals)
         results.append(row)
 
     results_df = pd.DataFrame(results)
@@ -63,11 +69,11 @@ def find_optimal_threshold(y_true, y_prob, avg_monthly_spend, thresholds=np.aran
     return optimal_threshold, results_df
 
 
-def evaluate_random_baseline(y_true, y_prob, avg_monthly_spend, fraction):
-    np.random.seed(42)
+def evaluate_random_baseline(y_true, y_prob, avg_monthly_spend, fraction, random_seed=RANDOM_SEED):
+    rng = np.random.RandomState(random_seed)
     n = len(y_true)
     n_target = int(n * fraction)
-    random_indices = np.random.choice(n, size=n_target, replace=False)
+    random_indices = rng.choice(n, size=n_target, replace=False)
 
     predictions = np.zeros(n)
     predictions[random_indices] = 1
