@@ -15,7 +15,8 @@ from src.evaluation.explainability import get_tree_explainer, compute_shap_expla
 from src.evaluation.profit_optimizer import compute_expected_profit, compute_avg_monthly_spend
 
 ICON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "churn_ledger_icon.png"))
-st.set_page_config(page_title="Churn Ledger", page_icon=ICON_PATH, layout="wide", initial_sidebar_state="expanded")
+PAGE_ICON = ICON_PATH if os.path.exists(ICON_PATH) else "\U0001F4D2"
+st.set_page_config(page_title="Churn Ledger", page_icon=PAGE_ICON, layout="wide", initial_sidebar_state="expanded")
 
 BG = "#FBF7EE"
 PANEL = "#FFFDF8"
@@ -813,7 +814,7 @@ with tab3:
 
     architecture_rows = {
         "Model": "XGBoost, natural class imbalance",
-        "Split": "chronological train/validation/test periods",
+        "Split": "chronological train/validation/test periods, embargo-purged at boundaries",
         "Calibration": "pre-test validation period",
         "Features": "12 RFM-based",
         "Window": "12-month observation, 90-day prediction",

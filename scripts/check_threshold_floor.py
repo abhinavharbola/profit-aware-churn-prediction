@@ -6,7 +6,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import PROCESSED_DIR, ARTIFACTS_DIR
+from config import PROCESSED_DIR, ARTIFACTS_DIR, EMBARGO_DAYS
 from src.modeling.trainer import prepare_data, temporal_train_val_test_split
 from src.evaluation.profit_optimizer import find_optimal_threshold, compute_avg_monthly_spend
 
@@ -38,9 +38,19 @@ if split_metadata.get("final_model_trained_on") != "train_only":
         "with the current trainer before trusting this script's output."
     )
 
+saved_embargo_days = split_metadata.get("embargo_days")
+if saved_embargo_days is not None and saved_embargo_days != EMBARGO_DAYS:
+    raise AssertionError(
+        f"split_metadata.pkl was produced with EMBARGO_DAYS={saved_embargo_days}, "
+        f"but config.py currently has EMBARGO_DAYS={EMBARGO_DAYS}. Reproducing the "
+        "split below with the current config would not match the split the saved "
+        "artifacts were actually trained/calibrated on. Re-run scripts/run_pipeline.py "
+        "or restore the original EMBARGO_DAYS before trusting this script's output."
+    )
+
 X, y, groups, feature_cols = prepare_data(feature_df)
 X_train, X_val, _, y_train, y_val, _, train_idx, val_idx, _ = temporal_train_val_test_split(
-    X, y, feature_df["obs_end"]
+    X, y, feature_df["obs_end"], embargo_days=EMBARGO_DAYS
 )
 
 if set(train_idx) & set(val_idx):
@@ -94,7 +104,7 @@ fine_thresholds = np.array([
     0.10, 0.15, 0.20, 0.30, 0.50, 0.70, 0.90
 ])
 fine_threshold, fine_results = find_optimal_threshold(
-    y_val.values, calibrated_probs, avg_monthly_spend, thresholds=fine_thresholds
+    y_val.values, calibrated_probs, avg_monthly_spend, thresholds=fine_thresholds, round_decimals=4
 )
 fine_results.insert(0, "requested_threshold", fine_thresholds)
 

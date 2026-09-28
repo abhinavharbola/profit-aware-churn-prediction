@@ -1,17 +1,23 @@
 __pycache__/
 *.py[cod]
-.pytest_cache/
+*.egg-info/
+.eggs/
+
 .venv/
 venv/
-.env
+env/
+.python-version
+
+.pytest_cache/
+.ipynb_checkpoints/
 .DS_Store
 
-# Local dataset and generated outputs
 data/raw/*
-data/processed/*
-artifacts/*
-
-# Keep directory placeholders
 !data/raw/.gitkeep
+data/processed/*
 !data/processed/.gitkeep
+
+artifacts/*
 !artifacts/.gitkeep
+
+.streamlit/secrets.toml

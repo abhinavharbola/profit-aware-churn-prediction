@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
     PROCESSED_DIR, ARTIFACTS_DIR, DEFAULT_THRESHOLD,
-    RANDOM_TARGET_FRACTION, CALIBRATION_METHOD
+    RANDOM_TARGET_FRACTION, CALIBRATION_METHOD, EMBARGO_DAYS
 )
 from src.data.cleaner import run_cleaning
 from src.data.temporal import generate_windows
@@ -40,6 +40,7 @@ print(f"Churn rate: {feature_df['churn'].mean():.3f}")
 feature_df.to_pickle(os.path.join(PROCESSED_DIR, "feature_matrix.pkl"))
 
 print("=== 4. Training XGBoost with chronological train/validation/test splits ===")
+print(f"Embargo purge around each split boundary: {EMBARGO_DAYS} days")
 X, y, groups, feature_cols = prepare_data(feature_df)
 model, study, feature_cols, X_train, y_train, X_val, y_val, X_test, y_test, train_idx, val_idx, test_idx = train_model(
     X, y, feature_cols, feature_df["obs_end"]
@@ -113,6 +114,7 @@ comparison_df.to_csv(os.path.join(PROCESSED_DIR, "profit_comparison.csv"), index
 threshold_results.to_csv(os.path.join(PROCESSED_DIR, "threshold_analysis.csv"), index=False)
 
 print("=== 9. Saving artifacts ===")
+n_purged = len(X) - (len(train_idx) + len(val_idx) + len(test_idx))
 artifacts = {
     "xgb_model.pkl": model,
     "calibrator.pkl": calibrator,
@@ -128,6 +130,8 @@ artifacts = {
         "validation_rows": len(val_idx),
         "test_rows": len(test_idx),
         "train_val_disjoint": bool(len(set(train_idx) & set(val_idx)) == 0),
+        "embargo_days": EMBARGO_DAYS,
+        "purged_rows": n_purged,
         "validation_end": str(feature_df.iloc[val_idx]["obs_end"].max()),
         "test_start": str(feature_df.iloc[test_idx]["obs_end"].min())
     }

@@ -12,7 +12,7 @@ Built entirely on free, open infrastructure: the public [Online Retail II](https
   <sub>Single Prediction, manual feature entry: Main landing UI</sub>
 </p>
 
-Additional screenshots in [`assets/`](assets/), one per tab/feature.
+Screenshots are not committed in this snapshot; see [`assets/README.md`](assets/README.md). The dashboard does not require them to run.
 
 ## What this is
 
@@ -21,9 +21,9 @@ Given the raw transaction file, the pipeline:
 1. Cleans it, drops rows with no customer ID, nets cancellations against the specific line item they credit (not the whole invoice), keeps only positive quantities and prices.
 2. Builds sliding observation/prediction windows per customer, so the same customer contributes multiple labeled examples across different points in time, not one static snapshot.
 3. Engineers 12 RFM-based features per customer per window, and labels churn by whether the customer bought again in the following 90 days.
-4. Tunes XGBoost on an earlier chronological validation period, calibrates on that pre-test validation period, selects the profit threshold there, and reports final metrics once on a later test period.
+4. Splits windows chronologically with an embargo gap around each split boundary, tunes XGBoost on an earlier chronological validation period, calibrates on that pre-test validation period, selects the profit threshold there, and reports final metrics once on a later test period.
 5. Sweeps decision thresholds to find the one that maximizes net campaign profit, not the one that maximizes accuracy.
-6. Serves all of this through a Streamlit dashboard: single-customer lookup, batch scoring, and a downloadable intervention list, every recommendation traceable back to the expected-value formula behind it.
+6. Serves all of this through a four-tab Streamlit dashboard (Single Prediction, Batch Analysis, Model Info, Batch Export): single-customer lookup, profit strategy comparison, model documentation, and batch scoring with a downloadable intervention list, every recommendation traceable back to the expected-value formula behind it.
 
 ## Architecture
 
@@ -32,7 +32,7 @@ flowchart TD
     raw[online_retail_II.xlsx] --> clean[Cleaner\nmissing IDs dropped, cancellations netted per line item]
     clean --> windows[Sliding windows\n365d observation / 90d prediction / 30d slide]
     windows --> features[RFM feature engineer\n12 features per customer per window]
-    features --> split[Chronological split\ntrain / validation / test]
+    features --> split[Chronological split with embargo gap\ntrain / validation / test]
     split -->|train| tune[XGBoost + Optuna\n50 trials, early-stopped against val, tuned against val only]
     split -->|val, early stopping only| tune
     tune --> finalfit[Final model refit\ntrain split only, val never trained on]
@@ -46,7 +46,7 @@ flowchart TD
     artifacts --> dashboard[Streamlit dashboard\nSingle Prediction, Batch Analysis, Model Info, Batch Export]
 ```
 
-`scripts/check_threshold_floor.py` runs a reduced path through this same architecture: it reloads the saved model and calibrator, reproduces the identical chronological train/validation/test split (deterministic given the fixed `RANDOM_SEED`), and re-sweeps thresholds alone, skipping cleaning, windowing, feature engineering, and tuning entirely. That's only possible because the split is reproducible by construction, not incidental.
+`scripts/check_threshold_floor.py` runs a reduced path through this same architecture: it reloads the saved model and calibrator, reproduces the identical chronological train/validation/test split, and re-sweeps thresholds alone, skipping cleaning, windowing, feature engineering, and tuning entirely. The split is a pure function of the sorted window dates, `VALIDATION_SIZE`, `TEST_SIZE`, and `EMBARGO_DAYS`; it involves no randomness, so `RANDOM_SEED` has no effect on it. The script verifies the recorded `embargo_days` and validation row count against the saved `split_metadata.pkl` before trusting the reproduction.
 
 ## Expected Value Framework
 
@@ -71,10 +71,13 @@ The evaluation protocol keeps every decision ahead of the final test period: hyp
 
 ## Guardrails
 
-- **Split integrity is asserted, not assumed.** `temporal_train_val_test_split()` (`src/modeling/trainer.py`) asserts chronological ordering and non-overlapping partitions; regression coverage lives in `tests/test_temporal_split.py`.
+- **Split integrity is asserted, not assumed.** `temporal_train_val_test_split()` (`src/modeling/trainer.py`) asserts chronological ordering, non-overlapping partitions, and the embargo gap; regression coverage lives in `tests/test_temporal_split.py`.
+- **Split boundaries are embargoed.** Windows slide by 30 days but each label looks 90 days ahead, so adjacent windows on opposite sides of a boundary would share label-defining transactions. `EMBARGO_DAYS` (default equal to `PREDICTION_WINDOW_DAYS`) reserves a band of windows at each boundary that belongs to no split, so no train/validation or validation/test pair has overlapping label periods. The band is reserved before sizing the splits, and the number of purged rows is recorded in `split_metadata.pkl`. See Known limitations for the cost and the residual feature-overlap caveat.
+- **Randomness is centralized.** Every seeded component (Optuna sampler, XGBoost, random baseline) reads `RANDOM_SEED` from `config.py`. The random baseline uses a local `RandomState`, so it neither hardcodes a seed nor mutates global numpy state.
 - **The final test set is not used for model selection.** Calibration and threshold selection happen on the pre-test validation period. The test period is used only for final metrics and locked-strategy evaluation.
 - **Calibration and thresholding run against data the final model never trained on.** `train_model()` fits the shipped model on the train split only; validation is never folded into that fit. `scripts/run_pipeline.py` records `final_model_trained_on: "train_only"` in `split_metadata.pkl`, and `tests/test_no_calibration_leakage.py` pins this behavior with a regression test that inspects every `XGBClassifier.fit()` call the training path makes. This used to not be true, an earlier version of `train_model()` refit the final model on `train + val` and then calibrated and thresholded against that same `val`, see the bug log at the bottom of this file.
 - **Cancellation netting is scoped, not global.** A cancellation only decrements the specific `(invoice, stockcode)` it matches, verified against duplicate-line-item and multi-cancellation edge cases in `tests/test_cleaner.py`, not just the common case.
+- **Graceful degradation on missing assets.** The page icon falls back to a text icon if `assets/churn_ledger_icon.png` is absent instead of crashing at startup.
 - **Graceful degradation on missing artifacts.** Every dashboard tab checks for its required model/data files before using them and shows a clear "run the pipeline first" message instead of a raw traceback.
 - **Graceful degradation on a zero or negative baseline.** The profit-lift calculation in Batch Analysis falls back to an absolute currency delta instead of dividing by zero or reporting a nonsensical percentage over a negative base.
 
@@ -99,8 +102,7 @@ The post-cleaning row count isn't hardcoded here since it depends on the actual 
 ```
 churn-profit-opt/
 │
-├── .streamlit/config.toml            # Explicit theme, so the app doesn't depend on OS/browser dark-mode
-
+├── .streamlit/config.toml       # Explicit theme, so the app doesn't depend on OS/browser dark-mode
 ├── config.py                    # All constants, paths, financial parameters
 ├── requirements.txt
 ├── .gitignore
@@ -108,7 +110,8 @@ churn-profit-opt/
 │
 ├── scripts/
 │   ├── run_pipeline.py             # End-to-end training and evaluation script
-│   └── check_threshold_floor.py    # Reuses saved artifacts to re-sweep thresholds without retraining
+│   ├── check_threshold_floor.py    # Reuses saved artifacts to re-sweep thresholds without retraining
+│   └── update_readme_results.py    # Writes latest metrics and profit comparison into the README results block
 │
 ├── src/
 │   ├── data/
@@ -129,8 +132,8 @@ churn-profit-opt/
 ├── tests/
 │   ├── test_temporal.py                  # sliding window boundaries + churn label correctness
 │   ├── test_rfm_engineer.py              # RFM aggregation math, seasonal_dropoff across all calendar months
-│   ├── test_profit_optimizer.py          # threshold sweep, argmax, compute_avg_monthly_spend scaling
-│   ├── test_temporal_split.py            # chronological ordering and split integrity
+│   ├── test_profit_optimizer.py          # threshold sweep, argmax, spend scaling, seeded baseline, rounding
+│   ├── test_temporal_split.py            # chronological ordering, split integrity, embargo gap and purge
 │   ├── test_cleaner.py                   # cancellation netting, duplicate line items, multi-cancellation sums
 │   └── test_no_calibration_leakage.py    # final model is fit on train only, never on validation
 │
@@ -139,7 +142,7 @@ churn-profit-opt/
 │   └── processed/                  # Generated feature matrices and results
 │
 ├── artifacts/                      # Serialized model, calibration, threshold, and evaluation artifacts
-└── assets/                         # Dashboard assets for README
+└── assets/                         # Optional dashboard screenshots and icon (see assets/README.md)
 ```
 
 ## Getting started
@@ -165,16 +168,20 @@ churn-profit-opt/
    | `COST_OF_OFFER` | 10.0 | Cost per retention intervention (£) |
    | `INTERVENTION_SUCCESS_RATE` | 0.15 | Fraction of churners who accept the offer |
    | `MONTHS_REVENUE_SAVED` | 3 | Revenue horizon if customer is retained |
+   | `RANDOM_SEED` | 42 | Seed for Optuna, XGBoost, and the random baseline |
    | `OPTUNA_TRIALS` | 50 | Number of hyperparameter search trials |
+   | `EARLY_STOPPING_ROUNDS` | 30 | Early stopping patience for each Optuna trial |
    | `CALIBRATION_METHOD` | isotonic | isotonic or platt |
    | `VALIDATION_SIZE` | 0.2 | Fraction of chronological windows used before the final test period |
    | `TEST_SIZE` | 0.2 | Final chronological test fraction |
+   | `EMBARGO_DAYS` | 90 | Gap reserved at each split boundary; equal to `PREDICTION_WINDOW_DAYS` guarantees no label overlap across boundaries |
 
 ## Running it
 
 ```bash
 python scripts/run_pipeline.py     # cleans, tunes, calibrates, selects threshold, evaluates, and saves artifacts
-pytest tests/ -v                   # 33 tests, offline, small synthetic fixtures, no dataset needed
+python scripts/update_readme_results.py   # writes the latest metrics and profit comparison into this README
+pytest tests/ -v                   # 41 tests, offline, small synthetic fixtures, no dataset needed
 streamlit run app/app.py           # dashboard; needs the artifacts from the pipeline run above
 ```
 
@@ -184,22 +191,22 @@ The dashboard has four tabs. **Single Prediction** takes manual RFM input or a c
 
 Evaluation here means two different things, and this project doesn't blur them: whether the code is correct (unit tests), and whether the model is actually good (held-out metrics). Conflating them is how leakage bugs like the one below hide for a while.
 
-- **Unit tests** (`tests/`, `pytest tests/ -v`) run offline against small synthetic fixtures and check code correctness, not model quality: sliding-window boundaries, RFM aggregation math, the profit formula's arithmetic, cancellation-netting edge cases, split disjointness, and (as of the bug log entry below) that the final model is never fit on the rows used to calibrate or threshold it. 33 tests total, see the file-by-file breakdown in [Project Structure](#project-structure).
+- **Unit tests** (`tests/`, `pytest tests/ -v`) run offline against small synthetic fixtures and check code correctness, not model quality: sliding-window boundaries, RFM aggregation math, the profit formula's arithmetic, cancellation-netting edge cases, split disjointness, and (as of the bug log entry below) that the final model is never fit on the rows used to calibrate or threshold it. 41 tests total, see the file-by-file breakdown in [Project Structure](#project-structure).
 - **Model quality** is PR-AUC, Brier score, and net profit, computed once on the held-out test split described in Models and Guardrails above, using `scripts/run_pipeline.py`. PR-AUC rather than ROC-AUC on purpose: ROC-AUC inflates performance on class-imbalanced data like this by rewarding correct ranking of the abundant negative class.
 - **Those numbers, on the real dataset:**
 
-  | Metric | Value |
-  |---|---|
-  | PR-AUC (final temporal test) | generated by the pipeline |
-  | Brier score (final temporal test) | generated by the pipeline |
-  | Locked profit threshold | selected on threshold-selection split |
+<!-- RESULTS:START -->
+Results have not been generated yet. After running `python scripts/run_pipeline.py` on the real dataset, run `python scripts/update_readme_results.py` to replace this block with the actual PR-AUC, Brier score, locked threshold, split sizes, and profit comparison.
+<!-- RESULTS:END -->
 
-  The exact figures are intentionally generated at runtime. They will change with the data snapshot, random seed, temporal boundaries, model configuration, and financial assumptions. `scripts/check_threshold_floor.py` rechecks the threshold sweep on the dedicated threshold-selection period without touching the final test period, and it also checks `split_metadata.pkl` to confirm the model that produced those artifacts was trained on the train split alone. That's still a determinism and provenance check, not a substitute for the dedicated leakage regression test in `tests/test_no_calibration_leakage.py`, reproducing a sweep proves the sweep is stable given its inputs, it doesn't independently prove those inputs were leak-free.
+  The figures above are written by `scripts/update_readme_results.py` rather than typed by hand. They will change with the data snapshot, random seed, temporal boundaries, model configuration, and financial assumptions. `scripts/check_threshold_floor.py` rechecks the threshold sweep on the dedicated threshold-selection period without touching the final test period, and it also checks `split_metadata.pkl` to confirm the model that produced those artifacts was trained on the train split alone. That's still a determinism and provenance check, not a substitute for the dedicated leakage regression test in `tests/test_no_calibration_leakage.py`, reproducing a sweep proves the sweep is stable given its inputs, it doesn't independently prove those inputs were leak-free.
 
 
 ## Known limitations
 
 - Cancellation matching's `C`-prefix convention is a mitigation, not a guarantee; see Data Integrity above.
+- The embargo is expensive on this dataset. At the default 365/90/30-day settings, the roughly two-year date range yields only about 10 windows. A 90-day embargo reserves 3 windows at each boundary, so about 6 of 10 windows are excluded from every split, leaving roughly 2 train, 1 validation, and 1 test window. Lowering `EMBARGO_DAYS` (for example to 30) retains more data at the price of partial label overlap across boundaries; setting it to 0 removes the embargo. The pipeline prints the purged row count and stores it in `split_metadata.pkl`.
+- The embargo removes label overlap only. Observation windows are 365 days long, so windows on opposite sides of a boundary still share most of their input transactions and produce similar feature rows. Eliminating that would need an embargo of at least `OBSERVATION_WINDOW_DAYS + PREDICTION_WINDOW_DAYS`, which this dataset cannot support. Validation-based tuning, calibration, and threshold selection should be read with that in mind.
 - Temporal evaluation gives up customer-disjoint partitions because the same customer can legitimately be observed at earlier and later forecast times. The final test period is strictly later than the training and validation periods.
 - `monetary_avg` is mean revenue per transaction line item, not per order/invoice; the dashboard labels it explicitly to avoid implying true average order value.
 - The intervention success rate is a configurable constant, not a learned parameter; in production this would come from A/B testing.
@@ -213,3 +220,7 @@ Evaluation here means two different things, and this project doesn't blur them: 
 Fix: the final model now fits on `X_train` alone. `X_val` stays genuinely unseen by that model and is used only for calibration and threshold selection, exactly the way the README's own stated evaluation protocol always claimed it worked. As a side effect of no longer relying on validation data to pad out the final training set, the Optuna objective now uses real early stopping (`early_stopping_rounds` + `eval_metric="aucpr"`, both previously accepted as no-op-adjacent constructor arguments that had no `early_stopping_rounds` to actually trigger on), and the final model's `n_estimators` is set to the best trial's actual early-stopped iteration count rather than the raw suggested upper bound. `tests/test_no_calibration_leakage.py` pins this by spying on every `XGBClassifier.fit()` call `train_model()` makes and asserting the final call trains on exactly `len(X_train)` rows, never `len(X_train) + len(X_val)`.
 
 This replaced the cancellation-matching bug referenced above in Data Integrity, an earlier version of the netting logic in `src/data/cleaner.py` matched a cancellation to the wrong `(invoice, stockcode)` pair in cases with duplicate line items, corrupting an unrelated row's quantity rather than just leaving a non-conforming refund unmatched. The current row-scoped `(invoice, customer_id, stockcode)` merge in `clean_data()`, and the duplicate-line and multi-cancellation regression tests in `tests/test_cleaner.py`, are what replaced it.
+
+**Sliding-window splits had no embargo, plus several smaller inconsistencies.** Windows slide by 30 days with a 365-day observation window and a 90-day label horizon, but the chronological split cut on `obs_end` with no gap. The last train window and first validation window (and likewise validation and test) shared most of their input transactions and up to 60 of 90 label-defining days, so validation-based tuning, calibration, and threshold selection were less independent than the split integrity guardrail implied. Fix: `temporal_train_val_test_split()` now reserves `EMBARGO_DAYS` worth of windows at each boundary before sizing the splits, asserts the gap, and records `embargo_days` and `purged_rows` in `split_metadata.pkl`; `check_threshold_floor.py` refuses to run if the recorded embargo differs from `config.py`. A first attempt that purged after computing fraction-based boundaries emptied the validation set on the real dataset's roughly 10 windows, which is why the embargo is now reserved up front.
+
+Also fixed: `evaluate_random_baseline()` hardcoded seed 42 and mutated global numpy state, and now uses a local `RandomState(RANDOM_SEED)`; `find_optimal_threshold()` gained `round_decimals` so the sub-0.01 diagnostic grid in `check_threshold_floor.py` no longer collapses onto a displayed 0.0; the README's claim that split reproducibility depends on `RANDOM_SEED` was wrong and has been corrected; and `app.py` no longer crashes if the page icon asset is missing.
