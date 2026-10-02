@@ -4,6 +4,16 @@ Predicts customer churn, calibrates the scores into probabilities, and decides p
 
 Built on free, open tools: the public [Online Retail II](https://archive.ics.uci.edu/dataset/502/online+retail+ii) dataset, XGBoost, Optuna, scikit-learn, SHAP and Streamlit. No paid APIs, no GPU.
 
+## Preview
+
+<p align="center">
+  <img src="assets/landing_view.png" width="720" alt="Streamlit dashboard showing manual RFM feature entry with sliders and number inputs, a four-stat result row, and a SHAP waterfall explanation">
+  <br>
+  <sub>Single Prediction, manual feature entry: Main landing UI</sub>
+</p>
+
+> Additional screenshots in [`assets/`](assets/).
+
 ## What this is
 
 Given the raw transaction file, the pipeline:
