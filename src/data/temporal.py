@@ -3,11 +3,11 @@ from config import OBSERVATION_WINDOW_DAYS, PREDICTION_WINDOW_DAYS, SLIDE_INTERV
 
 
 def generate_windows(df, observation_days=OBSERVATION_WINDOW_DAYS,
-                      prediction_days=PREDICTION_WINDOW_DAYS,
-                      slide_days=SLIDE_INTERVAL_DAYS):
-    df = df.copy()
+                     prediction_days=PREDICTION_WINDOW_DAYS,
+                     slide_days=SLIDE_INTERVAL_DAYS):
     date_min = df["invoicedate"].min()
     date_max = df["invoicedate"].max()
+    purchases = df[~df["is_return"]]
 
     window_start = date_min
     windows = []
@@ -17,13 +17,10 @@ def generate_windows(df, observation_days=OBSERVATION_WINDOW_DAYS,
         obs_end = obs_start + timedelta(days=observation_days)
         pred_end = obs_end + timedelta(days=prediction_days)
 
-        obs_mask = (df["invoicedate"] >= obs_start) & (df["invoicedate"] < obs_end)
-        obs_df = df[obs_mask].copy()
+        obs_df = df[(df["invoicedate"] >= obs_start) & (df["invoicedate"] < obs_end)]
+        pred_df = purchases[(purchases["invoicedate"] >= obs_end) & (purchases["invoicedate"] < pred_end)]
 
-        pred_mask = (df["invoicedate"] >= obs_end) & (df["invoicedate"] < pred_end)
-        pred_df = df[pred_mask].copy()
-
-        obs_customers = set(obs_df["customer_id"].unique())
+        obs_customers = set(obs_df.loc[~obs_df["is_return"], "customer_id"].unique())
         pred_customers = set(pred_df["customer_id"].unique())
 
         churn_labels = {cust_id: (0 if cust_id in pred_customers else 1) for cust_id in obs_customers}

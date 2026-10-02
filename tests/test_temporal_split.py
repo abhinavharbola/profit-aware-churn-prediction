@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-from src.modeling.trainer import prepare_data, temporal_train_val_test_split
+from src.modeling.trainer import prepare_data, temporal_train_val_test_split, split_validation_by_customer
 
 
 def _synthetic_feature_df():
@@ -64,7 +64,7 @@ def test_embargo_gap_enforced_between_train_and_validation():
 
     dates = feature_df["obs_end"]
     gap = (dates.iloc[val_idx].min() - dates.iloc[train_idx].max()).days
-    assert gap > embargo_days
+    assert gap >= embargo_days
 
 
 def test_embargo_gap_enforced_between_validation_and_test():
@@ -76,7 +76,7 @@ def test_embargo_gap_enforced_between_validation_and_test():
 
     dates = feature_df["obs_end"]
     gap = (dates.iloc[test_idx].min() - dates.iloc[val_idx].max()).days
-    assert gap > embargo_days
+    assert gap >= embargo_days
 
 
 def test_rows_within_embargo_window_are_purged_from_all_splits():
@@ -112,3 +112,46 @@ def test_negative_embargo_days_raises():
 
     with pytest.raises(ValueError):
         temporal_train_val_test_split(X, y, feature_df["obs_end"], embargo_days=-1)
+
+
+def test_embargo_purges_exactly_the_windows_needed_for_the_label_horizon():
+    feature_df = _synthetic_feature_df()
+    X, y, groups, feature_cols = prepare_data(feature_df)
+    result = temporal_train_val_test_split(X, y, feature_df["obs_end"], embargo_days=90)
+    train_idx, val_idx, test_idx = result[-3:]
+
+    dates = feature_df["obs_end"]
+    used = set(dates.iloc[np.concatenate([train_idx, val_idx, test_idx])])
+    assert dates.nunique() - len(used) == 4
+    assert (dates.iloc[val_idx].min() - dates.iloc[train_idx].max()).days == 90
+    assert (dates.iloc[test_idx].min() - dates.iloc[val_idx].max()).days == 90
+
+
+def test_embargo_shorter_than_one_slide_purges_nothing():
+    feature_df = _synthetic_feature_df()
+    X, y, groups, feature_cols = prepare_data(feature_df)
+    result = temporal_train_val_test_split(X, y, feature_df["obs_end"], embargo_days=30)
+    n_used = sum(len(idx) for idx in result[-3:])
+    assert n_used == len(X)
+
+
+def test_validation_customer_split_is_deterministic_and_disjoint():
+    feature_df = _synthetic_feature_df()
+    X, y, groups, feature_cols = prepare_data(feature_df)
+    val_idx = temporal_train_val_test_split(X, y, feature_df["obs_end"])[-2]
+
+    tune_a, cal_a = split_validation_by_customer(val_idx, groups)
+    tune_b, cal_b = split_validation_by_customer(val_idx, groups)
+    assert np.array_equal(tune_a, tune_b) and np.array_equal(cal_a, cal_b)
+    assert set(tune_a).isdisjoint(cal_a)
+    assert len(tune_a) + len(cal_a) == len(val_idx)
+    assert set(groups.iloc[val_idx[tune_a]]).isdisjoint(set(groups.iloc[val_idx[cal_a]]))
+
+
+def test_validation_customer_split_raises_when_one_part_is_empty():
+    feature_df = _synthetic_feature_df()
+    X, y, groups, feature_cols = prepare_data(feature_df)
+    val_idx = temporal_train_val_test_split(X, y, feature_df["obs_end"])[-2]
+    all_even = groups.copy() * 0 + 2
+    with pytest.raises(ValueError):
+        split_validation_by_customer(val_idx, all_even)

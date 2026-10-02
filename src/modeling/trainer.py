@@ -1,4 +1,5 @@
 import warnings
+from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import xgboost as xgb
@@ -36,41 +37,31 @@ def temporal_train_val_test_split(
     if n < 6:
         raise ValueError("At least 6 distinct observation dates are required for a temporal split.")
 
-    if n > 1:
-        span_days = (pd.Timestamp(unique_dates[-1]) - pd.Timestamp(unique_dates[0])).days
-        typical_gap_days = span_days / (n - 1) if span_days > 0 else 0
-    else:
-        typical_gap_days = 0
+    span_days = (pd.Timestamp(unique_dates[-1]) - pd.Timestamp(unique_dates[0])).days
+    typical_gap_days = span_days / (n - 1) if span_days > 0 else 0
 
-    requested_steps = int(np.ceil(embargo_days / typical_gap_days)) if typical_gap_days > 0 else 0
-    embargo_steps = min(requested_steps, max(0, (n - 3) // 2))
-    if embargo_steps < requested_steps:
+    required_step = int(np.ceil(embargo_days / typical_gap_days)) if typical_gap_days > 0 and embargo_days > 0 else 0
+    required_purge = max(0, required_step - 1)
+    purge = min(required_purge, max(0, (n - 3) // 2))
+    embargo_reduced = purge < required_purge
+    if embargo_reduced:
         warnings.warn(
-            f"Requested {embargo_days}-day embargo needs {requested_steps} dates per "
+            f"A {embargo_days}-day embargo needs {required_purge} purged dates per "
             f"boundary but only {n} distinct observation dates exist; reduced to "
-            f"{embargo_steps}. Label periods across split boundaries may still overlap."
+            f"{purge}. Label periods across split boundaries may still overlap."
         )
+    step = purge + 1
 
-    n_effective = n - 2 * embargo_steps
-    if n_effective < 3:
-        raise ValueError(
-            f"Only {n} distinct observation dates are available and the "
-            f"{embargo_days}-day embargo needs to reserve {embargo_steps} "
-            "dates at each of the two split boundaries, leaving too few "
-            "dates for a non-empty train/validation/test split. Reduce "
-            "embargo_days, reduce SLIDE_INTERVAL_DAYS to get more (closer "
-            "together) windows, or provide a longer date range."
-        )
+    n_effective = n - 2 * purge
 
     train_fraction = 1 - validation_size - test_size
     train_count = min(n_effective - 2, max(1, int(round(n_effective * train_fraction))))
     val_count = min(n_effective - train_count - 1, max(1, int(round(n_effective * validation_size))))
-    test_count = n_effective - train_count - val_count
 
     train_boundary = train_count - 1
-    val_start_boundary = train_boundary + embargo_steps + 1
+    val_start_boundary = train_boundary + step
     val_boundary = val_start_boundary + val_count - 1
-    test_start_boundary = val_boundary + embargo_steps + 1
+    test_start_boundary = val_boundary + step
 
     train_end = unique_dates[train_boundary]
     val_start_date = unique_dates[val_start_boundary]
@@ -98,12 +89,13 @@ def temporal_train_val_test_split(
     train_dates = dates.iloc[train_idx]
     val_dates = dates.iloc[val_idx]
     test_dates = dates.iloc[test_idx]
-    min_gap = pd.Timedelta(days=embargo_steps * typical_gap_days)
-    if not (
-        train_dates.max() + min_gap < val_dates.min()
-        and val_dates.max() + min_gap < test_dates.min()
-    ):
-        raise AssertionError("Temporal split does not maintain the required embargo gap.")
+    gap_train_val = (val_dates.min() - train_dates.max()).days
+    gap_val_test = (test_dates.min() - val_dates.max()).days
+    if not embargo_reduced and (gap_train_val < embargo_days or gap_val_test < embargo_days):
+        raise AssertionError(
+            f"Temporal split gaps ({gap_train_val}, {gap_val_test} days) are below the "
+            f"required {embargo_days}-day embargo."
+        )
 
     return (
         X.iloc[train_idx].reset_index(drop=True),
@@ -116,7 +108,16 @@ def temporal_train_val_test_split(
     )
 
 
-def objective(trial, X_train, y_train, X_val, y_val):
+def split_validation_by_customer(val_idx, groups):
+    customer_ids = groups.iloc[val_idx].to_numpy()
+    tune_positions = np.where(customer_ids % 2 == 0)[0]
+    calibration_positions = np.where(customer_ids % 2 == 1)[0]
+    if len(tune_positions) == 0 or len(calibration_positions) == 0:
+        raise ValueError("Validation period has too few distinct customers to split into tuning and calibration parts.")
+    return tune_positions, calibration_positions
+
+
+def objective(trial, X_train, y_train, X_tune, y_tune):
     params = {
         "n_estimators": trial.suggest_int("n_estimators", 100, 800),
         "max_depth": trial.suggest_int("max_depth", 3, 10),
@@ -134,13 +135,33 @@ def objective(trial, X_train, y_train, X_val, y_val):
         "verbosity": 0
     }
     model = xgb.XGBClassifier(**params)
-    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
-    y_pred = model.predict_proba(X_val)[:, 1]
+    model.fit(X_train, y_train, eval_set=[(X_tune, y_tune)], verbose=False)
+    y_pred = model.predict_proba(X_tune)[:, 1]
     trial.set_user_attr("best_iteration", model.best_iteration)
-    return average_precision_score(y_val, y_pred)
+    return average_precision_score(y_tune, y_pred)
 
 
-def train_model(X, y, feature_cols, obs_end, n_trials=OPTUNA_TRIALS):
+@dataclass
+class TrainingResult:
+    model: object
+    study: object
+    feature_cols: list
+    X_train: pd.DataFrame
+    y_train: pd.Series
+    X_tune: pd.DataFrame
+    y_tune: pd.Series
+    X_cal: pd.DataFrame
+    y_cal: pd.Series
+    X_test: pd.DataFrame
+    y_test: pd.Series
+    train_idx: np.ndarray
+    tune_idx: np.ndarray
+    cal_idx: np.ndarray
+    test_idx: np.ndarray
+    final_fit_rows: int
+
+
+def train_model(X, y, feature_cols, obs_end, groups, n_trials=OPTUNA_TRIALS):
     X_train, X_val, X_test, y_train, y_val, y_test, train_idx, val_idx, test_idx = \
         temporal_train_val_test_split(X, y, obs_end)
 
@@ -148,14 +169,19 @@ def train_model(X, y, feature_cols, obs_end, n_trials=OPTUNA_TRIALS):
     if n_purged > 0:
         print(f"Embargo purge: {n_purged} rows near split boundaries excluded from all splits.")
 
+    tune_pos, cal_pos = split_validation_by_customer(val_idx, groups)
+    X_tune, y_tune = X_val.iloc[tune_pos].reset_index(drop=True), y_val.iloc[tune_pos].reset_index(drop=True)
+    X_cal, y_cal = X_val.iloc[cal_pos].reset_index(drop=True), y_val.iloc[cal_pos].reset_index(drop=True)
+    tune_idx, cal_idx = val_idx[tune_pos], val_idx[cal_pos]
+
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=RANDOM_SEED))
     study.optimize(
-        lambda trial: objective(trial, X_train, y_train, X_val, y_val),
+        lambda trial: objective(trial, X_train, y_train, X_tune, y_tune),
         n_trials=n_trials,
         show_progress_bar=True
     )
 
-    best_params = study.best_params
+    best_params = dict(study.best_params)
     best_iteration = study.best_trial.user_attrs.get("best_iteration")
     if best_iteration is not None:
         best_params["n_estimators"] = best_iteration + 1
@@ -168,4 +194,10 @@ def train_model(X, y, feature_cols, obs_end, n_trials=OPTUNA_TRIALS):
     model = xgb.XGBClassifier(**best_params)
     model.fit(X_train, y_train, verbose=False)
 
-    return model, study, feature_cols, X_train, y_train, X_val, y_val, X_test, y_test, train_idx, val_idx, test_idx
+    return TrainingResult(
+        model=model, study=study, feature_cols=feature_cols,
+        X_train=X_train, y_train=y_train, X_tune=X_tune, y_tune=y_tune,
+        X_cal=X_cal, y_cal=y_cal, X_test=X_test, y_test=y_test,
+        train_idx=train_idx, tune_idx=tune_idx, cal_idx=cal_idx, test_idx=test_idx,
+        final_fit_rows=len(X_train)
+    )

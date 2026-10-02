@@ -12,7 +12,7 @@ def compute_avg_monthly_spend(monetary_total, observation_days=OBSERVATION_WINDO
     months = observation_days / DAYS_PER_MONTH
     if months <= 0:
         return 0.0
-    return monetary_total / months
+    return np.clip(monetary_total, 0, None) / months
 
 
 def compute_expected_profit(prob, avg_monthly_spend):
@@ -81,6 +81,12 @@ def evaluate_random_baseline(y_true, y_prob, avg_monthly_spend, fraction, random
     return _evaluate(y_true, predictions, avg_monthly_spend)
 
 
-def evaluate_default_baseline(y_true, y_prob, avg_monthly_spend, threshold=0.5):
+def evaluate_threshold_strategy(y_true, y_prob, avg_monthly_spend, threshold=0.5):
     predictions = (y_prob >= threshold).astype(int)
+    return _evaluate(y_true, predictions, avg_monthly_spend)
+
+
+def evaluate_expected_value_strategy(y_true, y_prob, avg_monthly_spend):
+    expected_profit = compute_expected_profit(np.asarray(y_prob), np.asarray(avg_monthly_spend))
+    predictions = (expected_profit > 0).astype(int)
     return _evaluate(y_true, predictions, avg_monthly_spend)

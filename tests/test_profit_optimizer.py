@@ -1,10 +1,12 @@
 import numpy as np
 import pandas as pd
 import pytest
+from config import COST_OF_OFFER, INTERVENTION_SUCCESS_RATE, MONTHS_REVENUE_SAVED, RANDOM_SEED
 from src.evaluation.profit_optimizer import (
     find_optimal_threshold,
     evaluate_random_baseline,
-    evaluate_default_baseline,
+    evaluate_threshold_strategy,
+    evaluate_expected_value_strategy,
     compute_expected_profit,
     compute_avg_monthly_spend,
     _evaluate,
@@ -32,10 +34,14 @@ def test_argmax_selection_matches_manual_recomputation():
 
     max_row = results_df.loc[results_df["net_profit"].idxmax()]
     assert optimal_threshold == max_row["threshold"]
-    assert results_df["net_profit"].max() == results_df["net_profit"].max()
 
+    manual = {}
+    for t in results_df["threshold"]:
+        predictions = (y_prob >= t).astype(int)
+        manual[t] = _evaluate(y_true, predictions, avg_monthly_spend)["net_profit"]
+    assert optimal_threshold == max(manual, key=lambda t: (manual[t], -t))
     for _, row in results_df.iterrows():
-        assert row["net_profit"] <= results_df["net_profit"].max()
+        assert row["net_profit"] == pytest.approx(manual[row["threshold"]])
 
 
 def test_higher_threshold_reduces_or_keeps_interventions():
@@ -52,10 +58,10 @@ def test_false_positive_only_case_yields_negative_profit():
     y_prob = np.array([0.95, 0.90, 0.85])
     avg_monthly_spend = pd.Series([50.0, 50.0, 50.0])
 
-    result = evaluate_default_baseline(y_true, y_prob, avg_monthly_spend, threshold=0.5)
+    result = evaluate_threshold_strategy(y_true, y_prob, avg_monthly_spend, threshold=0.5)
     assert result["true_positives"] == 0
     assert result["false_positives"] == 3
-    assert result["net_profit"] == -3 * 10.0
+    assert result["net_profit"] == -3 * COST_OF_OFFER
 
 
 def test_random_baseline_intervention_count_matches_fraction():
@@ -85,7 +91,7 @@ def test_random_baseline_follows_configured_seed_not_a_hardcoded_one():
     fraction = 0.3
     n_target = int(n * fraction)
 
-    for seed in (42, 7, 2024):
+    for seed in (RANDOM_SEED, 7, 2024):
         expected_indices = np.random.RandomState(seed).choice(n, size=n_target, replace=False)
         expected_predictions = np.zeros(n)
         expected_predictions[expected_indices] = 1
@@ -95,16 +101,16 @@ def test_random_baseline_follows_configured_seed_not_a_hardcoded_one():
         assert actual == expected
 
     default_result = evaluate_random_baseline(y_true, y_prob, avg_monthly_spend, fraction=fraction)
-    explicit_42_result = evaluate_random_baseline(
-        y_true, y_prob, avg_monthly_spend, fraction=fraction, random_seed=42
+    explicit_default_seed_result = evaluate_random_baseline(
+        y_true, y_prob, avg_monthly_spend, fraction=fraction, random_seed=RANDOM_SEED
     )
-    assert default_result == explicit_42_result
+    assert default_result == explicit_default_seed_result
 
 
 def test_compute_expected_profit_formula():
     profit = compute_expected_profit(prob=0.5, avg_monthly_spend=100.0)
-    expected = 0.5 * 0.15 * (100.0 * 3) - 10.0
-    assert profit == expected
+    expected = 0.5 * INTERVENTION_SUCCESS_RATE * (100.0 * MONTHS_REVENUE_SAVED) - COST_OF_OFFER
+    assert profit == pytest.approx(expected)
 
 
 def test_avg_monthly_spend_scales_down_from_annual_total():
@@ -117,9 +123,9 @@ def test_avg_monthly_spend_scales_down_from_annual_total():
 def test_revenue_saved_no_longer_collapses_to_full_total():
     monetary_total = 1200.0
     avg_spend = compute_avg_monthly_spend(monetary_total, observation_days=365)
-    revenue_saved_3mo = avg_spend * 3
-    assert revenue_saved_3mo < monetary_total
-    assert revenue_saved_3mo == pytest.approx(monetary_total * 3 / (365 / 30.44))
+    revenue_saved = avg_spend * MONTHS_REVENUE_SAVED
+    assert revenue_saved < monetary_total
+    assert revenue_saved == pytest.approx(monetary_total * MONTHS_REVENUE_SAVED / (365 / 30.44))
 
 
 def test_avg_monthly_spend_handles_series_input():
@@ -141,3 +147,20 @@ def test_round_decimals_param_preserves_small_thresholds():
 
     assert coarse_results["threshold"].nunique() == 1
     assert fine_results["threshold"].nunique() == len(fine_thresholds)
+
+
+def test_negative_monetary_total_is_clipped_to_zero_spend():
+    assert compute_avg_monthly_spend(-500.0, observation_days=365) == 0.0
+    result = compute_avg_monthly_spend(pd.Series([-10.0, 100.0]), observation_days=365)
+    assert result.iloc[0] == 0.0
+    assert result.iloc[1] > 0.0
+
+
+def test_expected_value_strategy_targets_only_positive_expected_profit():
+    y_true = np.array([1, 1, 0, 0])
+    y_prob = np.array([0.9, 0.9, 0.9, 0.9])
+    spend = pd.Series([1000.0, 1.0, 1000.0, 1.0])
+    result = evaluate_expected_value_strategy(y_true, y_prob, spend)
+    assert result["total_interventions"] == 2
+    assert result["true_positives"] == 1
+    assert result["false_positives"] == 1

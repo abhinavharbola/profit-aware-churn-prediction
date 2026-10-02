@@ -5,11 +5,11 @@ from sklearn.metrics import (
 )
 
 
-def compute_metrics(y_true, y_prob):
-    pr_auc = average_precision_score(y_true, y_prob)
+def compute_metrics(y_true, y_score, y_prob):
+    pr_auc = average_precision_score(y_true, y_score)
     brier = brier_score_loss(y_true, y_prob)
 
-    precision, recall, thresholds = precision_recall_curve(y_true, y_prob)
+    precision, recall, thresholds = precision_recall_curve(y_true, y_score)
 
     return {
         "pr_auc": pr_auc,
