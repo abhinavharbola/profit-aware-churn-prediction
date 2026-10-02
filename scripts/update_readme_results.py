@@ -36,14 +36,15 @@ def build_block():
     if not os.path.exists(comparison_path):
         raise FileNotFoundError(f"{comparison_path} not found. Run scripts/run_pipeline.py first.")
     comparison = pd.read_csv(comparison_path)
+    comparison["Net Campaign Profit"] = comparison["Net Campaign Profit"].map(lambda v: f"£{v:,.0f}")
 
     total = split["train_rows"] + split["validation_rows"] + split["test_rows"] + split.get("purged_rows", 0)
 
     summary = pd.DataFrame({
         "Metric": [
-            "PR-AUC (final temporal test)",
-            "Brier score (final temporal test)",
-            "Locked profit threshold (selected on validation)",
+            "PR-AUC (final temporal test, raw scores)",
+            "Brier score (final temporal test, calibrated)",
+            "Locked profit threshold (selected on validation, cross-fitted)",
         ],
         "Value": [f"{metrics['pr_auc']:.4f}", f"{metrics['brier_score']:.4f}", f"{float(threshold):.2f}"],
     })
@@ -52,7 +53,7 @@ def build_block():
         "Split": ["Train", "Validation", "Test", "Purged by embargo"],
         "Rows": [
             f"{split['train_rows']:,}",
-            f"{split['validation_rows']:,}",
+            f"{split['validation_rows']:,} ({split['tuning_rows']:,} tuning, {split['calibration_rows']:,} calibration)",
             f"{split['test_rows']:,}",
             f"{split.get('purged_rows', 0):,}",
         ],

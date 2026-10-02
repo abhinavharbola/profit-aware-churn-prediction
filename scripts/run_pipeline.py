@@ -1,7 +1,9 @@
 import os
 import sys
 import pickle
+import numpy as np
 import pandas as pd
+import xgboost as xgb
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -11,14 +13,15 @@ from config import (
 )
 from src.data.cleaner import run_cleaning
 from src.data.temporal import generate_windows
-from src.features.rfm_engineer import build_feature_matrix
+from src.features.rfm_engineer import build_feature_matrix, build_current_snapshot
 from src.modeling.trainer import prepare_data, train_model
-from src.modeling.calibrator import calibrate_probabilities
+from src.modeling.calibrator import calibrate_probabilities, cross_fitted_probabilities
 from src.evaluation.metrics import compute_metrics
 from src.evaluation.profit_optimizer import (
     find_optimal_threshold,
     evaluate_random_baseline,
-    evaluate_default_baseline,
+    evaluate_threshold_strategy,
+    evaluate_expected_value_strategy,
     compute_avg_monthly_spend
 )
 
@@ -38,74 +41,67 @@ feature_df = build_feature_matrix(windows)
 print(f"Feature matrix shape: {feature_df.shape}")
 print(f"Churn rate: {feature_df['churn'].mean():.3f}")
 feature_df.to_pickle(os.path.join(PROCESSED_DIR, "feature_matrix.pkl"))
+snapshot_df = build_current_snapshot(df_clean)
+print(f"Current snapshot: {len(snapshot_df)} customers scored as of {snapshot_df['obs_end'].iloc[0].date()}")
+snapshot_df.to_pickle(os.path.join(PROCESSED_DIR, "current_snapshot.pkl"))
 
 print("=== 4. Training XGBoost with chronological train/validation/test splits ===")
 print(f"Embargo purge around each split boundary: {EMBARGO_DAYS} days")
 X, y, groups, feature_cols = prepare_data(feature_df)
-model, study, feature_cols, X_train, y_train, X_val, y_val, X_test, y_test, train_idx, val_idx, test_idx = train_model(
-    X, y, feature_cols, feature_df["obs_end"]
-)
-print(f"Best trial PR-AUC (validation set, used for tuning only): {study.best_value:.4f}")
-print(f"Final model trained on {len(X_train)} rows (train split only, validation held out for calibration)")
+result = train_model(X, y, feature_cols, feature_df["obs_end"], groups)
+model = result.model
+print(f"Best trial PR-AUC (tuning half of validation, used for tuning only): {result.study.best_value:.4f}")
+print(f"Final model trained on {result.final_fit_rows} rows (train split only)")
+print(f"Validation period split by customer: {len(result.tune_idx)} tuning rows, {len(result.cal_idx)} calibration rows")
 
-print("=== 5. Calibrating probabilities (on the pre-test validation period the final model never trained on) ===")
-calibration_func, calibrator = calibrate_probabilities(model, X_val, y_val)
+print("=== 5. Calibrating probabilities (on the calibration half the model and tuner never saw) ===")
+calibration_func, calibrator = calibrate_probabilities(model, result.X_cal, result.y_cal)
 
-print("=== 6. Selecting the profit threshold (on the pre-test validation period) ===")
-val_raw_probs = model.predict_proba(X_val)[:, 1]
-val_calibrated_probs = calibration_func(val_raw_probs)
-val_spend = compute_avg_monthly_spend(
-    feature_df.iloc[val_idx]["monetary_total"].reset_index(drop=True)
+print("=== 6. Selecting the profit threshold (on cross-fitted calibrated probabilities) ===")
+cal_raw_probs = model.predict_proba(result.X_cal)[:, 1]
+cal_oof_probs = cross_fitted_probabilities(cal_raw_probs, result.y_cal)
+cal_spend = compute_avg_monthly_spend(
+    feature_df.iloc[result.cal_idx]["monetary_total"].reset_index(drop=True)
 )
 optimal_threshold, threshold_results = find_optimal_threshold(
-    y_val.values, val_calibrated_probs, val_spend
+    result.y_cal.values, cal_oof_probs, cal_spend
 )
 print(f"Locked profit threshold selected without using the final test set: {optimal_threshold}")
 
 print("=== 7. Final evaluation (test set used only after all choices are locked) ===")
-test_raw_probs = model.predict_proba(X_test)[:, 1]
+test_raw_probs = model.predict_proba(result.X_test)[:, 1]
 test_calibrated_probs = calibration_func(test_raw_probs)
-metrics = compute_metrics(y_test, test_calibrated_probs)
-print(f"PR-AUC: {metrics['pr_auc']:.4f}")
-print(f"Brier Score: {metrics['brier_score']:.4f}")
+metrics = compute_metrics(result.y_test, test_raw_probs, test_calibrated_probs)
+print(f"PR-AUC (raw scores): {metrics['pr_auc']:.4f}")
+print(f"Brier Score (calibrated probabilities): {metrics['brier_score']:.4f}")
 
 test_spend = compute_avg_monthly_spend(
-    feature_df.iloc[test_idx]["monetary_total"].reset_index(drop=True)
+    feature_df.iloc[result.test_idx]["monetary_total"].reset_index(drop=True)
 )
 
 print("=== 8. Baseline comparison on final test set ===")
-random_result = evaluate_random_baseline(
-    y_test.values, test_calibrated_probs, test_spend, RANDOM_TARGET_FRACTION
-)
-default_result = evaluate_default_baseline(
-    y_test.values, test_calibrated_probs, test_spend, DEFAULT_THRESHOLD
-)
-locked_result = evaluate_default_baseline(
-    y_test.values, test_calibrated_probs, test_spend, optimal_threshold
-)
+y_test_values = result.y_test.values
+strategies = {
+    f"Random ({RANDOM_TARGET_FRACTION:.0%})": evaluate_random_baseline(
+        y_test_values, test_calibrated_probs, test_spend, RANDOM_TARGET_FRACTION
+    ),
+    f"Default Threshold ({DEFAULT_THRESHOLD})": evaluate_threshold_strategy(
+        y_test_values, test_calibrated_probs, test_spend, DEFAULT_THRESHOLD
+    ),
+    "Profit-Optimized Threshold": evaluate_threshold_strategy(
+        y_test_values, test_calibrated_probs, test_spend, optimal_threshold
+    ),
+    "Expected-Value Rule": evaluate_expected_value_strategy(
+        y_test_values, test_calibrated_probs, test_spend
+    ),
+}
 
 comparison_df = pd.DataFrame({
-    "Strategy": ["Random (20%)", "Default Threshold (0.5)", "Profit-Optimized"],
-    "Total Interventions": [
-        random_result["total_interventions"],
-        default_result["total_interventions"],
-        locked_result["total_interventions"]
-    ],
-    "True Positives": [
-        random_result["true_positives"],
-        default_result["true_positives"],
-        locked_result["true_positives"]
-    ],
-    "Wasted Spend (FP)": [
-        random_result["false_positives"],
-        default_result["false_positives"],
-        locked_result["false_positives"]
-    ],
-    "Net Campaign Profit": [
-        f"£{random_result['net_profit']:,.0f}",
-        f"£{default_result['net_profit']:,.0f}",
-        f"£{locked_result['net_profit']:,.0f}"
-    ]
+    "Strategy": list(strategies.keys()),
+    "Total Interventions": [r["total_interventions"] for r in strategies.values()],
+    "True Positives": [r["true_positives"] for r in strategies.values()],
+    "Wasted Spend (FP)": [r["false_positives"] for r in strategies.values()],
+    "Net Campaign Profit": [round(float(r["net_profit"]), 2) for r in strategies.values()],
 })
 
 print("\n=== Profit Comparison on Final Test Set ===")
@@ -114,26 +110,38 @@ comparison_df.to_csv(os.path.join(PROCESSED_DIR, "profit_comparison.csv"), index
 threshold_results.to_csv(os.path.join(PROCESSED_DIR, "threshold_analysis.csv"), index=False)
 
 print("=== 9. Saving artifacts ===")
-n_purged = len(X) - (len(train_idx) + len(val_idx) + len(test_idx))
+n_purged = len(X) - (len(result.train_idx) + len(result.tune_idx) + len(result.cal_idx) + len(result.test_idx))
+index_sets = [set(result.train_idx), set(result.tune_idx), set(result.cal_idx), set(result.test_idx)]
+splits_disjoint = all(
+    index_sets[i].isdisjoint(index_sets[j])
+    for i in range(len(index_sets)) for j in range(i + 1, len(index_sets))
+)
+validation_idx = np.concatenate([result.tune_idx, result.cal_idx])
 artifacts = {
     "xgb_model.pkl": model,
     "calibrator.pkl": calibrator,
-    "feature_names.pkl": feature_cols,
+    "feature_names.pkl": result.feature_cols,
     "calibration_method.pkl": CALIBRATION_METHOD,
     "optimal_threshold.pkl": optimal_threshold,
     "metrics.pkl": {"pr_auc": metrics["pr_auc"], "brier_score": metrics["brier_score"]},
     "split_metadata.pkl": {
         "method": "chronological_train_validation_test",
-        "final_model_trained_on": "train_only",
-        "calibration_and_threshold_selection_period": "validation",
-        "train_rows": len(train_idx),
-        "validation_rows": len(val_idx),
-        "test_rows": len(test_idx),
-        "train_val_disjoint": bool(len(set(train_idx) & set(val_idx)) == 0),
+        "final_model_trained_on": "train_only" if (
+            splits_disjoint and result.final_fit_rows == len(result.train_idx)
+        ) else "unverified",
+        "final_fit_rows": result.final_fit_rows,
+        "calibration_and_threshold_selection_period": "calibration half of validation, cross-fitted",
+        "train_rows": len(result.train_idx),
+        "tuning_rows": len(result.tune_idx),
+        "calibration_rows": len(result.cal_idx),
+        "validation_rows": len(result.tune_idx) + len(result.cal_idx),
+        "test_rows": len(result.test_idx),
+        "splits_disjoint": splits_disjoint,
         "embargo_days": EMBARGO_DAYS,
         "purged_rows": n_purged,
-        "validation_end": str(feature_df.iloc[val_idx]["obs_end"].max()),
-        "test_start": str(feature_df.iloc[test_idx]["obs_end"].min())
+        "validation_end": str(feature_df.iloc[validation_idx]["obs_end"].max()),
+        "test_start": str(feature_df.iloc[result.test_idx]["obs_end"].min()),
+        "xgboost_version": xgb.__version__,
     }
 }
 for filename, value in artifacts.items():
