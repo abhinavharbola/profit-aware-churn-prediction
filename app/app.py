@@ -4,18 +4,24 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import plotly.graph_objects as go
+import shap
+import xgboost as xgb
 import pickle
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import COST_OF_OFFER, INTERVENTION_SUCCESS_RATE, MONTHS_REVENUE_SAVED, ARTIFACTS_DIR, PROCESSED_DIR
+from config import (
+    COST_OF_OFFER, INTERVENTION_SUCCESS_RATE, MONTHS_REVENUE_SAVED, ARTIFACTS_DIR, PROCESSED_DIR,
+    OPTUNA_TRIALS, OBSERVATION_WINDOW_DAYS, PREDICTION_WINDOW_DAYS
+)
+from src.modeling.calibrator import make_calibration_func
 from src.evaluation.explainability import get_tree_explainer, compute_shap_explanation
 from src.evaluation.profit_optimizer import compute_expected_profit, compute_avg_monthly_spend
 
 ICON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "churn_ledger_icon.png"))
-PAGE_ICON = ICON_PATH if os.path.exists(ICON_PATH) else "\U0001F4D2"
+PAGE_ICON = ICON_PATH if os.path.exists(ICON_PATH) else None
 st.set_page_config(page_title="Churn Ledger", page_icon=PAGE_ICON, layout="wide", initial_sidebar_state="expanded")
 
 BG = "#FBF7EE"
@@ -447,7 +453,7 @@ CALIBRATION_METHOD_PATH = os.path.join(ARTIFACTS_DIR, "calibration_method.pkl")
 OPTIMAL_THRESHOLD_PATH = os.path.join(ARTIFACTS_DIR, "optimal_threshold.pkl")
 METRICS_PATH = os.path.join(ARTIFACTS_DIR, "metrics.pkl")
 SPLIT_METADATA_PATH = os.path.join(ARTIFACTS_DIR, "split_metadata.pkl")
-FEATURE_MATRIX_PATH = os.path.join(PROCESSED_DIR, "feature_matrix.pkl")
+SNAPSHOT_PATH = os.path.join(PROCESSED_DIR, "current_snapshot.pkl")
 
 FEATURE_LABELS = {
     "recency": "Recency (days)",
@@ -486,19 +492,16 @@ def load_artifacts():
     with open(SPLIT_METADATA_PATH, "rb") as f:
         split_metadata = pickle.load(f)
 
-    def calibrate(scores):
-        if calibration_method == "isotonic":
-            return calibrator_obj.transform(scores)
-        return calibrator_obj.predict_proba(np.array(scores).reshape(-1, 1))[:, 1]
+    calibrate = make_calibration_func(calibrator_obj, calibration_method)
 
     return model, calibrate, feature_names, optimal_threshold, metrics, split_metadata
 
 
 @st.cache_data
-def load_feature_matrix():
-    if not os.path.exists(FEATURE_MATRIX_PATH):
+def load_snapshot():
+    if not os.path.exists(SNAPSHOT_PATH):
         return None
-    return pd.read_pickle(FEATURE_MATRIX_PATH)
+    return pd.read_pickle(SNAPSHOT_PATH)
 
 
 def stat_card(label, value, kind=""):
@@ -520,10 +523,10 @@ def render_threshold_chart(threshold_df, optimal_threshold):
         mode="lines",
         line=dict(color=PROFIT, width=2),
         fill="tozeroy",
-        fillcolor="rgba(211,169,75,0.15)",
+        fillcolor="rgba(27,122,77,0.15)",
         name="Net profit"
     ))
-    optimal_row = threshold_df[threshold_df["threshold"] == optimal_threshold]
+    optimal_row = threshold_df[np.isclose(threshold_df["threshold"], optimal_threshold)]
     if not optimal_row.empty:
         fig.add_trace(go.Scatter(
             x=optimal_row["threshold"],
@@ -584,7 +587,7 @@ with st.sidebar:
         f"""
         <div style="font-size:0.85rem; line-height:1.6; color:{INK_SOFT};">
         <span class="legend-swatch" style="background-color:{PROFIT};"></span>Intervene: expected profit is positive.<br>
-        <span class="legend-swatch" style="background-color:{LOSS};"></span>Do not intervene: expected profit is negative.
+        <span class="legend-swatch" style="background-color:{LOSS};"></span>Do not intervene: expected profit is zero or negative.
         </div>
         """,
         unsafe_allow_html=True
@@ -598,10 +601,20 @@ with st.sidebar:
 
 model, calibrate, feature_names, optimal_threshold, metrics, split_metadata = load_artifacts()
 
+saved_xgboost_version = split_metadata.get("xgboost_version")
+if saved_xgboost_version is not None and saved_xgboost_version != xgb.__version__:
+    st.warning(
+        f"Artifacts were produced with xgboost {saved_xgboost_version} but xgboost "
+        f"{xgb.__version__} is installed. Re-run scripts/run_pipeline.py to avoid incompatible pickles."
+    )
+
 tab1, tab2, tab3, tab4 = st.tabs(["Single prediction", "Batch analysis", "Model info", "Batch export"])
 
 with tab1:
     input_mode = st.radio("Input mode", ["Manual feature entry", "Customer ID lookup"], horizontal=True)
+
+    input_values = None
+    avg_monthly_spend_for_profit = None
 
     if input_mode == "Manual feature entry":
         st.markdown('<div class="section-label">RFM features</div>', unsafe_allow_html=True)
@@ -616,7 +629,7 @@ with tab1:
             unique_products = st.slider("Unique products", 1, 200, 10)
             spend_30d = st.number_input("Spend, 30 days (£)", 0.0, 20000.0, 200.0, step=50.0)
         with col3:
-            spend_90d = st.number_input("Spend, 90 days (£)", 0.0, 30000.0, 600.0, step=50.0)
+            spend_90d = st.number_input("Spend, 90 days (£)", 0.0, 30000.0, 400.0, step=50.0)
             interpurchase_mean = st.number_input("Avg days between purchases", 0.0, 365.0, 30.0)
             interpurchase_std = st.number_input("Std days between purchases", 0.0, 200.0, 15.0)
 
@@ -624,8 +637,16 @@ with tab1:
         with col4:
             spend_trend = st.number_input("Spend trend (slope)", -500.0, 500.0, 0.0, step=10.0)
         with col5:
-            product_diversity = st.slider("Product diversity", 0.0, 1.0, 0.5)
-            seasonal_dropoff = st.selectbox("Recent drop-off (91-180d ago, quiet since)", [0, 1])
+            dropoff_options = [0, 1] if recency > 90 else [0]
+            seasonal_dropoff = st.selectbox("Recent drop-off (91-180d ago, quiet since)", dropoff_options)
+
+        product_diversity = unique_products / frequency
+        st.caption(f"Product diversity (unique products per invoice), derived: {product_diversity:.2f}")
+
+        inputs_valid = True
+        if not spend_30d <= spend_90d <= monetary_total:
+            st.error("Spend must satisfy: 30-day spend <= 90-day spend <= monetary total.")
+            inputs_valid = False
 
         manual_inputs = {
             "recency": recency,
@@ -644,42 +665,36 @@ with tab1:
         missing_features = [f for f in feature_names if f not in manual_inputs]
         if missing_features:
             st.error(f"Manual entry form is missing input for: {', '.join(missing_features)}")
-            st.stop()
-        input_values = np.array([[manual_inputs[f] for f in feature_names]])
+            inputs_valid = False
 
-        avg_monthly_spend_for_profit = compute_avg_monthly_spend(monetary_total)
+        if inputs_valid:
+            input_values = np.array([[manual_inputs[f] for f in feature_names]], dtype=float)
+            avg_monthly_spend_for_profit = compute_avg_monthly_spend(monetary_total)
 
     else:
         st.markdown('<div class="section-label">Customer ID lookup</div>', unsafe_allow_html=True)
 
-        feature_df = load_feature_matrix()
-        if feature_df is None:
-            st.error("Feature matrix not found. Run 'python scripts/run_pipeline.py' first.")
-            st.stop()
+        snapshot_df = load_snapshot()
+        if snapshot_df is None:
+            st.error("Current snapshot not found. Run 'python scripts/run_pipeline.py' first.")
+        else:
+            available_ids = sorted(snapshot_df["customer_id"].unique())
+            customer_id_input = st.selectbox("Select customer ID", available_ids)
 
-        available_ids = sorted(feature_df["customer_id"].unique())
-        customer_id_input = st.selectbox("Select customer ID", available_ids)
+            customer_row = snapshot_df[snapshot_df["customer_id"] == customer_id_input].iloc[0]
+            st.caption(
+                f"Current snapshot, observation window ending {customer_row['obs_end'].strftime('%Y-%m-%d')}. "
+                "This window has no observed outcome yet and was never used in training."
+            )
 
-        customer_data = feature_df[feature_df["customer_id"] == customer_id_input]
-        if customer_data.empty:
-            st.error("Customer ID not found in feature matrix.")
-            st.stop()
+            input_values = customer_row[feature_names].astype(float).to_numpy().reshape(1, -1)
+            avg_monthly_spend_for_profit = compute_avg_monthly_spend(customer_row["monetary_total"])
 
-        latest_window = customer_data.sort_values("obs_end").iloc[-1]
-        st.caption(f"Most recent observation window ending {latest_window['obs_end'].strftime('%Y-%m-%d')}")
-
-        input_values = np.array([[latest_window[col] for col in feature_names]])
-
-        monetary_total_val = latest_window["monetary_total"]
-        avg_monthly_spend_for_profit = compute_avg_monthly_spend(monetary_total_val)
-
-    if st.button("Predict churn probability", type="primary"):
+    if input_values is not None and st.button("Predict churn probability", type="primary"):
         input_df = pd.DataFrame(input_values, columns=feature_names)
 
         raw_prob = model.predict_proba(input_df)[:, 1][0]
-        calibrated_prob = calibrate(np.array([raw_prob]))[0]
-        if isinstance(calibrated_prob, np.ndarray):
-            calibrated_prob = float(calibrated_prob)
+        calibrated_prob = float(calibrate(np.array([raw_prob]))[0])
 
         expected_profit = compute_expected_profit(calibrated_prob, avg_monthly_spend_for_profit)
         revenue_3m = avg_monthly_spend_for_profit * MONTHS_REVENUE_SAVED
@@ -703,7 +718,7 @@ with tab1:
             st.markdown('<div class="section-label">Financial breakdown</div>', unsafe_allow_html=True)
             breakdown_rows = [
                 ("Avg monthly spend", f"£{avg_monthly_spend_for_profit:,.2f}"),
-                ("Revenue at stake, 3 months", f"£{revenue_3m:,.2f}"),
+                (f"Revenue at stake, {MONTHS_REVENUE_SAVED} months", f"£{revenue_3m:,.2f}"),
                 ("Intervention success rate", f"{INTERVENTION_SUCCESS_RATE:.0%}"),
                 ("Expected revenue saved", f"£{calibrated_prob * INTERVENTION_SUCCESS_RATE * revenue_3m:,.2f}"),
                 ("Intervention cost", f"£{COST_OF_OFFER:,.2f}"),
@@ -716,7 +731,7 @@ with tab1:
             st.markdown(f'<div class="ledger-panel">{rows_html}</div>', unsafe_allow_html=True)
 
         with detail_col2:
-            st.markdown('<div class="section-label">SHAP explanation</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-label">SHAP explanation, raw model score</div>', unsafe_allow_html=True)
             try:
                 explainer = get_tree_explainer(model)
                 display_names = [FEATURE_LABELS.get(f, f) for f in feature_names]
@@ -728,13 +743,15 @@ with tab1:
                 mpl.rcParams["axes.edgecolor"] = LINE
                 mpl.rcParams["xtick.color"] = INK
                 mpl.rcParams["ytick.color"] = INK
-                fig, ax = plt.subplots(figsize=(5, 3.2))
-                import shap
                 shap.waterfall_plot(explanation, show=False)
                 fig = plt.gcf()
                 style_shap_figure(fig)
                 st.pyplot(fig)
                 plt.close(fig)
+                st.caption(
+                    "Contributions to the uncalibrated model log-odds. The churn probability above "
+                    "is this score after calibration, so the two are on different scales."
+                )
             except Exception as e:
                 st.warning(f"SHAP explanation unavailable: {e}")
 
@@ -746,30 +763,31 @@ with tab2:
         comparison_df = pd.read_csv(COMPARISON_PATH)
 
         st.markdown('<div class="section-label">Baseline comparison</div>', unsafe_allow_html=True)
-        st.dataframe(comparison_df, hide_index=True, width='stretch')
-
-        default_profit = float(
-            comparison_df[comparison_df["Strategy"] == "Default Threshold (0.5)"]["Net Campaign Profit"]
-            .str.replace("£", "", regex=False).str.replace(",", "", regex=False).values[0]
+        st.dataframe(
+            comparison_df.style.format({"Net Campaign Profit": "£{:,.0f}"}),
+            hide_index=True,
+            width='stretch'
         )
-        optimal_profit = float(
-            comparison_df[comparison_df["Strategy"] == "Profit-Optimized"]["Net Campaign Profit"]
-            .str.replace("£", "", regex=False).str.replace(",", "", regex=False).values[0]
-        )
-        profit_delta = optimal_profit - default_profit
 
-        if default_profit > 0:
-            lift_pct = (profit_delta / default_profit) * 100
-            insight_text = (
-                f"The profit-optimized threshold lifts net profit by {lift_pct:.1f}% "
-                f"over the default 0.5 cutoff."
+        def strategy_profit(prefix):
+            rows = comparison_df[comparison_df["Strategy"].str.startswith(prefix)]
+            return float(rows["Net Campaign Profit"].iloc[0])
+
+        default_profit = strategy_profit("Default Threshold")
+
+        def versus_default(label, profit):
+            delta = profit - default_profit
+            if default_profit > 0:
+                return f"{label} changes net profit by {delta / default_profit * 100:+.1f}% versus the default cutoff."
+            return (
+                f"{label} changes net profit by £{delta:,.0f} versus the default cutoff "
+                f"(percentage change isn't meaningful when the baseline is zero or negative)."
             )
-        else:
-            insight_text = (
-                f"The profit-optimized threshold changes net profit by £{profit_delta:,.0f} "
-                f"versus the default 0.5 cutoff (percentage lift isn't meaningful when the "
-                f"baseline is zero or negative)."
-            )
+
+        insight_text = " ".join([
+            versus_default("The profit-optimized threshold", strategy_profit("Profit-Optimized Threshold")),
+            versus_default("The per-customer expected-value rule used in this dashboard", strategy_profit("Expected-Value Rule")),
+        ])
 
         st.markdown(
             f'<div class="insight-line">{insight_text}</div>',
@@ -780,30 +798,34 @@ with tab2:
             threshold_df = pd.read_csv(THRESHOLD_PATH)
             st.markdown('<div class="section-label">Threshold sweep</div>', unsafe_allow_html=True)
             st.plotly_chart(render_threshold_chart(threshold_df, optimal_threshold), width='stretch')
-            st.caption(f"Threshold sweep on the pre-test validation period. Locked threshold: {optimal_threshold:.2f}. The final test set is not used to select it.")
+            st.caption(
+                f"Threshold sweep on the calibration half of the validation period, using cross-fitted "
+                f"probabilities. Locked threshold: {optimal_threshold:.2f}. The final test set is not used to select it."
+            )
     else:
         st.info("Profit comparison data not found. Run 'python scripts/run_pipeline.py' first.")
 
 with tab3:
     feature_descriptions = {
         "recency": "Days since last purchase",
-        "frequency": "Unique invoices in window",
-        "monetary_total": "Total revenue in window",
+        "frequency": "Unique purchase invoices in window",
+        "monetary_total": "Net revenue in window (returns subtracted)",
         "monetary_avg": "Avg revenue per line item (not per order)",
         "unique_products": "Distinct products purchased",
         "spend_30d": "Spend in last 30 days",
         "spend_90d": "Spend in last 90 days",
-        "interpurchase_mean": "Avg days between purchases",
-        "interpurchase_std": "Std days between purchases",
-        "spend_trend": "Slope of monthly spend",
-        "product_diversity": "Unique products / total orders",
-        "seasonal_dropoff": "Inactive last 90d",
+        "interpurchase_mean": "Avg days between invoices",
+        "interpurchase_std": "Std days between invoices",
+        "spend_trend": "Slope of 30-day-bucket spend, empty buckets count as zero",
+        "product_diversity": "Unique products / unique invoices",
+        "seasonal_dropoff": "Active 91-180d ago, inactive in last 90d",
     }
 
-    feature_items = list(feature_descriptions.items())
-    feature_groups = [feature_items[:6], feature_items[6:]]
+    feature_items = [(f, feature_descriptions.get(f, "")) for f in feature_names]
+    half = (len(feature_items) + 1) // 2
+    feature_groups = [feature_items[:half], feature_items[half:]]
     feature_columns_html = "".join(
-        '<div class="feature-column">'
+        '<div>'
         + "".join(
             f'<div class="breakdown-row"><span>{feat}</span><span style="color:{INK_SOFT};">{desc}</span></div>'
             for feat, desc in group
@@ -813,12 +835,12 @@ with tab3:
     )
 
     architecture_rows = {
-        "Model": "XGBoost, natural class imbalance",
+        "Model": "XGBoost, no class reweighting",
         "Split": "chronological train/validation/test periods, embargo-purged at boundaries",
-        "Calibration": "pre-test validation period",
-        "Features": "12 RFM-based",
-        "Window": "12-month observation, 90-day prediction",
-        "Tuning": "50 Optuna trials on earlier validation data",
+        "Calibration": "calibration half of the validation period, cross-fitted for threshold selection",
+        "Features": f"{len(feature_names)} RFM-based",
+        "Window": f"{OBSERVATION_WINDOW_DAYS}-day observation, {PREDICTION_WINDOW_DAYS}-day prediction",
+        "Tuning": f"{OPTUNA_TRIALS} Optuna trials on the tuning half of the validation period",
     }
     architecture_html = "".join(
         f'<div class="breakdown-row"><span>{label}</span><span style="color:{INK_SOFT};">{value}</span></div>'
@@ -829,7 +851,7 @@ with tab3:
         "Decision rule": "INTERVENE when expected profit > £0",
         "Customer-level": "Profit depends on each one's spend and churn risk",
         "Revenue": f"Avg monthly spend × {MONTHS_REVENUE_SAVED} months",
-        "Offer economics": f"{INTERVENTION_SUCCESS_RATE:.0%} success rate × revenue at stake − £{COST_OF_OFFER:.0f} cost",
+        "Offer economics": f"{INTERVENTION_SUCCESS_RATE:.0%} success rate × revenue at stake × churn probability − £{COST_OF_OFFER:,.2f} cost",
     }
     decision_html = "".join(
     f'<div class="breakdown-row {"customer-level-row" if label == "Customer-level" else ""}"><span>{label}</span><span style="color:{INK_SOFT};">{value}</span></div>'
@@ -840,9 +862,9 @@ with tab3:
         f'<div class="model-info-grid">'
         f'<div class="info-card feature-card">'
         f'<div class="info-card-title">Feature descriptions</div>'
-        f'<div class="info-card-subtitle">The 12 RFM-based inputs used by the model.</div>'
+        f'<div class="info-card-subtitle">The {len(feature_names)} RFM-based inputs used by the model.</div>'
         f'<div class="feature-columns">{feature_columns_html}</div>'
-        f'<div class="architecture-note">seasonal_dropoff is a binary recency signal: 1 when a customer was active 91–180 days ago but inactive during the last 90 days.</div>'
+        f'<div class="architecture-note">seasonal_dropoff is a binary recency signal: 1 when a customer was active 91 to 180 days ago but inactive during the last 90 days.</div>'
         f'</div>'
         f'<div class="info-card architecture-card">'
         f'<div class="info-card-title">Architecture</div>'
@@ -855,7 +877,7 @@ with tab3:
     )
 
     config_rows = {
-        "Intervention cost": f"£{COST_OF_OFFER}",
+        "Intervention cost": f"£{COST_OF_OFFER:,.2f}",
         "Success rate": f"{INTERVENTION_SUCCESS_RATE:.0%}",
         "Revenue horizon": f"{MONTHS_REVENUE_SAVED} months",
     }
@@ -874,7 +896,7 @@ with tab3:
         f'</span>'
         f'</div>'
         f'<div style="font-size:0.78rem; line-height:1.5; color:{INK_SOFT};">'
-        f'p: calibrated churn probability · γ: success rate · V: avg monthly spend × 3 · C: cost'
+        f'p: calibrated churn probability · γ: success rate · V: avg monthly spend × {MONTHS_REVENUE_SAVED} · C: cost'
         f'</div>'
         f'</div>'
         f'<div class="info-card">'
@@ -888,9 +910,9 @@ with tab3:
     st.markdown(
         f'<div class="info-card">'
         f'<div class="info-card-title">Held-out evaluation</div>'
-        f'<div class="evaluation-grid">'
-        f'<div class="breakdown-row"><span>PR-AUC</span><span class="amount">{metrics["pr_auc"]:.4f}</span></div>'
-        f'<div class="breakdown-row"><span>Brier score</span><span class="amount">{metrics["brier_score"]:.4f}</span></div>'
+        f'<div>'
+        f'<div class="breakdown-row"><span>PR-AUC (raw scores)</span><span class="amount">{metrics["pr_auc"]:.4f}</span></div>'
+        f'<div class="breakdown-row"><span>Brier score (calibrated)</span><span class="amount">{metrics["brier_score"]:.4f}</span></div>'
         f'<div class="breakdown-row"><span>Locked threshold</span><span class="amount">{optimal_threshold:.2f}</span></div>'
         f'<div class="breakdown-row"><span>Evaluation split</span><span style="color:{INK_SOFT};">Final chronological test set</span></div>'
         f'</div>'
@@ -899,93 +921,80 @@ with tab3:
     )
 
 with tab4:
-    feature_df = load_feature_matrix()
-    if feature_df is None:
-        st.error("Feature matrix not found. Run 'python scripts/run_pipeline.py' first.")
-        st.stop()
+    snapshot_df = load_snapshot()
+    if snapshot_df is None:
+        st.error("Current snapshot not found. Run 'python scripts/run_pipeline.py' first.")
+    else:
+        st.markdown(
+            '<div class="insight-line">Each customer is scored on their own expected profit, not a single '
+            'population-level threshold. INTERVENE means the expected gain for that specific customer exceeds '
+            'the intervention cost. Scores use the current snapshot, an observation window ending after the '
+            'last transaction in the data, which the model never saw during training.</div>',
+            unsafe_allow_html=True
+        )
 
-    THRESHOLD_PATH = os.path.join(PROCESSED_DIR, "threshold_analysis.csv")
-    if not os.path.exists(THRESHOLD_PATH):
-        st.error("Threshold analysis not found. Run 'python scripts/run_pipeline.py' first.")
-        st.stop()
+        if st.button("Score all customers", type="primary"):
+            with st.spinner("Scoring customers..."):
+                scored = snapshot_df.copy()
 
-    st.markdown(
-        '<div class="insight-line">Each customer is scored on their own expected profit, not a single '
-        'population-level threshold. INTERVENE means the expected gain for that specific customer exceeds '
-        'the intervention cost.</div>',
-        unsafe_allow_html=True
-    )
-
-    if st.button("Score all customers", type="primary"):
-        with st.spinner("Scoring customers..."):
-            latest_windows = feature_df.sort_values("obs_end").groupby("customer_id").last().reset_index()
-
-            X_export = latest_windows[feature_names].copy()
-            raw_probs = model.predict_proba(X_export)[:, 1]
-            calibrated_probs = calibrate(raw_probs)
-            if isinstance(calibrated_probs, np.ndarray):
-                calibrated_probs = calibrated_probs.flatten()
-
-            latest_windows["calibrated_churn_prob"] = calibrated_probs
-            latest_windows["avg_monthly_spend"] = compute_avg_monthly_spend(latest_windows["monetary_total"])
-            latest_windows["expected_profit"] = latest_windows.apply(
-                lambda row: compute_expected_profit(row["calibrated_churn_prob"], row["avg_monthly_spend"]),
-                axis=1
-            )
-            latest_windows["intervention_decision"] = latest_windows["expected_profit"].apply(
-                lambda x: "INTERVENE" if x > 0 else "DO NOT INTERVENE"
-            )
-            latest_windows["revenue_at_stake"] = latest_windows["avg_monthly_spend"] * MONTHS_REVENUE_SAVED
-
-            export_columns = [
-                "customer_id", "calibrated_churn_prob", "avg_monthly_spend",
-                "revenue_at_stake", "expected_profit", "intervention_decision",
-                "recency", "frequency", "monetary_total", "obs_end"
-            ]
-            available_export_cols = [c for c in export_columns if c in latest_windows.columns]
-            results_df = latest_windows[available_export_cols].copy()
-            results_df = results_df.sort_values("expected_profit", ascending=False)
-
-            intervene_df = results_df[results_df["intervention_decision"] == "INTERVENE"]
-            do_not_df = results_df[results_df["intervention_decision"] == "DO NOT INTERVENE"]
-
-            st.markdown(
-                f"""
-                <div class="stat-grid">
-                    {stat_card("Customers scored", f"{len(results_df):,}")}
-                    {stat_card("Intervene", f"{len(intervene_df):,}", "profit")}
-                    {stat_card("Do not intervene", f"{len(do_not_df):,}", "loss")}
-                    {stat_card("Total expected profit", f"£{intervene_df['expected_profit'].sum():,.0f}", "profit")}
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-            st.markdown('<div class="section-label">1 · Intervention list, top 50 by expected profit</div>', unsafe_allow_html=True)
-            st.dataframe(
-                intervene_df.head(50).style.format({
-                    "calibrated_churn_prob": "{:.3f}",
-                    "avg_monthly_spend": "£{:,.2f}",
-                    "revenue_at_stake": "£{:,.2f}",
-                    "expected_profit": "£{:,.2f}",
-                    "monetary_total": "£{:,.2f}"
-                }),
-                width='stretch'
-            )
-
-            st.markdown('<div class="section-label">2 · Export</div>', unsafe_allow_html=True)
-            dl_col1, dl_col2 = st.columns(2)
-            with dl_col1:
-                st.download_button(
-                    label="Download intervention list (CSV)",
-                    data=intervene_df.to_csv(index=False),
-                    file_name="intervention_list.csv",
-                    mime="text/csv"
+                raw_probs = model.predict_proba(scored[feature_names])[:, 1]
+                scored["calibrated_churn_prob"] = calibrate(raw_probs)
+                scored["avg_monthly_spend"] = compute_avg_monthly_spend(scored["monetary_total"])
+                scored["expected_profit"] = compute_expected_profit(
+                    scored["calibrated_churn_prob"], scored["avg_monthly_spend"]
                 )
-            with dl_col2:
-                st.download_button(
-                    label="Download full results (CSV)",
-                    data=results_df.to_csv(index=False),
-                    file_name="all_customers_scored.csv",
-                    mime="text/csv"
+                scored["intervention_decision"] = np.where(
+                    scored["expected_profit"] > 0, "INTERVENE", "DO NOT INTERVENE"
                 )
+                scored["revenue_at_stake"] = scored["avg_monthly_spend"] * MONTHS_REVENUE_SAVED
+
+                export_columns = [
+                    "customer_id", "calibrated_churn_prob", "avg_monthly_spend",
+                    "revenue_at_stake", "expected_profit", "intervention_decision",
+                    "recency", "frequency", "monetary_total", "obs_end"
+                ]
+                results_df = scored[export_columns].sort_values("expected_profit", ascending=False)
+
+                intervene_df = results_df[results_df["intervention_decision"] == "INTERVENE"]
+                do_not_df = results_df[results_df["intervention_decision"] == "DO NOT INTERVENE"]
+
+                st.markdown(
+                    f"""
+                    <div class="stat-grid">
+                        {stat_card("Customers scored", f"{len(results_df):,}")}
+                        {stat_card("Intervene", f"{len(intervene_df):,}", "profit")}
+                        {stat_card("Do not intervene", f"{len(do_not_df):,}", "loss")}
+                        {stat_card("Total expected profit", f"£{intervene_df['expected_profit'].sum():,.0f}", "profit")}
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                st.markdown('<div class="section-label">1 · Intervention list, top 50 by expected profit</div>', unsafe_allow_html=True)
+                st.dataframe(
+                    intervene_df.head(50).style.format({
+                        "calibrated_churn_prob": "{:.3f}",
+                        "avg_monthly_spend": "£{:,.2f}",
+                        "revenue_at_stake": "£{:,.2f}",
+                        "expected_profit": "£{:,.2f}",
+                        "monetary_total": "£{:,.2f}"
+                    }),
+                    width='stretch'
+                )
+
+                st.markdown('<div class="section-label">2 · Export</div>', unsafe_allow_html=True)
+                dl_col1, dl_col2 = st.columns(2)
+                with dl_col1:
+                    st.download_button(
+                        label="Download intervention list (CSV)",
+                        data=intervene_df.to_csv(index=False),
+                        file_name="intervention_list.csv",
+                        mime="text/csv"
+                    )
+                with dl_col2:
+                    st.download_button(
+                        label="Download full results (CSV)",
+                        data=results_df.to_csv(index=False),
+                        file_name="all_customers_scored.csv",
+                        mime="text/csv"
+                    )
