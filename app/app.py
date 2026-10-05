@@ -637,7 +637,7 @@ with tab1:
         with col4:
             spend_trend = st.number_input("Spend trend (slope)", -500.0, 500.0, 0.0, step=10.0)
         with col5:
-            dropoff_options = [0, 1] if recency > 90 else [0]
+            dropoff_options = [0, 1] if 90 < recency <= 180 else [0]
             seasonal_dropoff = st.selectbox("Recent drop-off (91-180d ago, quiet since)", dropoff_options)
 
         product_diversity = unique_products / frequency
@@ -684,7 +684,8 @@ with tab1:
             customer_row = snapshot_df[snapshot_df["customer_id"] == customer_id_input].iloc[0]
             st.caption(
                 f"Current snapshot, observation window ending {customer_row['obs_end'].strftime('%Y-%m-%d')}. "
-                "This window has no observed outcome yet and was never used in training."
+                "This window has no observed outcome yet and was never a training or test example, "
+                "though its transactions overlap with the training and test periods."
             )
 
             input_values = customer_row[feature_names].astype(float).to_numpy().reshape(1, -1)
@@ -929,7 +930,7 @@ with tab4:
             '<div class="insight-line">Each customer is scored on their own expected profit, not a single '
             'population-level threshold. INTERVENE means the expected gain for that specific customer exceeds '
             'the intervention cost. Scores use the current snapshot, an observation window ending after the '
-            'last transaction in the data, which the model never saw during training.</div>',
+            'last transaction in the data. Its outcome has not happened yet, and it was never a training or test example.</div>',
             unsafe_allow_html=True
         )
 

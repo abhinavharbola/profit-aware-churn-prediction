@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import PROCESSED_DIR, ARTIFACTS_DIR, EMBARGO_DAYS
 from src.modeling.trainer import prepare_data, temporal_train_val_test_split, split_validation_by_customer
 from src.modeling.calibrator import cross_fitted_probabilities
-from src.evaluation.profit_optimizer import find_optimal_threshold, compute_avg_monthly_spend
+from src.evaluation.profit_optimizer import find_optimal_threshold, compute_avg_monthly_spend, THRESHOLD_GRID
 
 feature_matrix_path = os.path.join(PROCESSED_DIR, "feature_matrix.pkl")
 model_path = os.path.join(ARTIFACTS_DIR, "xgb_model.pkl")
@@ -69,7 +69,7 @@ calibrated_probs = cross_fitted_probabilities(raw_probs, y_cal, method=calibrati
 avg_monthly_spend = compute_avg_monthly_spend(
     feature_df.iloc[cal_idx]["monetary_total"].reset_index(drop=True)
 )
-pipeline_thresholds = np.arange(0.01, 0.91, 0.01)
+pipeline_thresholds = THRESHOLD_GRID
 
 reproduced_threshold, pipeline_results = find_optimal_threshold(
     y_cal.values, calibrated_probs, avg_monthly_spend, thresholds=pipeline_thresholds

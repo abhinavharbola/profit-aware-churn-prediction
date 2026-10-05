@@ -6,6 +6,7 @@ from config import (
 )
 
 DAYS_PER_MONTH = 30.44
+THRESHOLD_GRID = np.arange(0.0, 0.91, 0.01)
 
 
 def compute_avg_monthly_spend(monetary_total, observation_days=OBSERVATION_WINDOW_DAYS):
@@ -50,7 +51,7 @@ def _evaluate(y_true, predictions, avg_monthly_spend):
 
 def find_optimal_threshold(y_true, y_prob, avg_monthly_spend, thresholds=None, round_decimals=2):
     if thresholds is None:
-        thresholds = np.arange(0.01, 0.91, 0.01)
+        thresholds = THRESHOLD_GRID
 
     results = []
 
